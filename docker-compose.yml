@@ -1,0 +1,14 @@
+services:
+  memory:
+    build: .
+    platform: linux/amd64
+    ports:
+      - "8080:8080"
+    volumes:
+      - memory_data:/app/data
+    env_file:
+      - .env
+    restart: unless-stopped
+
+volumes:
+  memory_data:
