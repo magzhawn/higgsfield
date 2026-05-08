@@ -1,0 +1,108 @@
+[
+  {
+    "description": "Fact establishment and employer evolution",
+    "session_id": "fixture-conv-1",
+    "user_id": "user-fixture-1",
+    "turns": [
+      {
+        "messages": [
+          {
+            "role": "user",
+            "content": "I just moved to Berlin last month. Currently working at Stripe as a backend engineer."
+          }
+        ],
+        "timestamp": "2024-01-01T10:00:00Z"
+      },
+      {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Big news — I just started at Notion this week! Leaving Stripe behind. So excited for this new chapter."
+          }
+        ],
+        "timestamp": "2024-01-15T10:00:00Z"
+      }
+    ],
+    "probes": [
+      {
+        "query": "where does the user live?",
+        "expected_contains": "Berlin",
+        "expected_not_contains": null
+      },
+      {
+        "query": "where does the user work?",
+        "expected_contains": "Notion",
+        "expected_not_contains": "Stripe"
+      }
+    ]
+  },
+  {
+    "description": "Implicit facts — pet and diet from indirect mentions",
+    "session_id": "fixture-conv-2",
+    "user_id": "user-fixture-2",
+    "turns": [
+      {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Walking Biscuit this morning, he loved the park. Such a good boy."
+          }
+        ],
+        "timestamp": "2024-02-01T08:00:00Z"
+      },
+      {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Made myself a veggie bowl for lunch, been vegetarian for 3 years now."
+          }
+        ],
+        "timestamp": "2024-02-01T13:00:00Z"
+      }
+    ],
+    "probes": [
+      {
+        "query": "what is the user's pet name?",
+        "expected_contains": "Biscuit",
+        "expected_not_contains": null
+      },
+      {
+        "query": "what does the user eat?",
+        "expected_contains": "vegetarian",
+        "expected_not_contains": null
+      }
+    ]
+  },
+  {
+    "description": "Opinion evolution — stance on TypeScript changes over time",
+    "session_id": "fixture-conv-3",
+    "user_id": "user-fixture-3",
+    "turns": [
+      {
+        "messages": [
+          {
+            "role": "user",
+            "content": "I absolutely love TypeScript. It's the best language ever invented. Couldn't imagine working without it."
+          }
+        ],
+        "timestamp": "2024-03-01T09:00:00Z"
+      },
+      {
+        "messages": [
+          {
+            "role": "user",
+            "content": "TypeScript generics are getting really annoying lately. The complexity is starting to outweigh the benefits. Having second thoughts."
+          }
+        ],
+        "timestamp": "2024-03-15T09:00:00Z"
+      }
+    ],
+    "probes": [
+      {
+        "query": "what does the user think about TypeScript?",
+        "expected_contains": "annoying",
+        "expected_not_contains": null
+      }
+    ]
+  }
+]

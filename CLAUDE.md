@@ -93,11 +93,11 @@ Cosine search runs in-memory — no sqlite-vec extension needed.
 
 [x] Session 1 — Docker infrastructure
 [x] Session 2 — Database schema
-[ ] Session 3 — Models + middleware + route stubs
+[x] Session 3 — Models + middleware + route stubs
 [ ] Session 4 — Embeddings
-[ ] Session 5 — Extraction
-[ ] Session 6 — Recall + cache + wire-up
-[ ] Session 7 — Tests + fixtures
+[x] Session 5 — Extraction
+[x] Session 6 — Recall + cache + wire-up
+[x] Session 7 — Tests + fixtures
 [ ] Session 8 — CHANGELOG v1
 
 Update this checklist as sessions complete.
@@ -130,3 +130,21 @@ MEMORY_AUTH_TOKEN  — optional, if set validates Bearer token on all requests
 - Run the verification step at the end of each session
 - If verification fails, fix it before moving on
 - Never skip the CHANGELOG entry — write it while the session is fresh
+
+## v2 build state
+
+[x] Session 1 — v1 completed
+[ ] Session 2-1 — Noise fix + latency logging
+[ ] Session 2-2 — BM25 + RRF
+[ ] Session 2-3 — Batch embedding fallback
+[ ] Session 2-4 — Query rewriting
+[ ] Session 2-5 — Multi-hop retrieval
+[ ] Session 2-6 — Tests + fixture updates + CHANGELOG
+
+## What NOT to touch in v2
+
+- Extraction architecture (two-pass parallel) — working, don't refactor
+- Transaction pattern in db.ts — working
+- Supersession logic in extraction.ts — working
+- Tier budget assembly structure — extending, not replacing
+- All 18 existing contract tests — must still pass after every session
