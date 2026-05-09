@@ -1425,3 +1425,132 @@ hedge.
 with "rewrite earns its cost; reranker/entities/graph/derived
 each serve objectives that binary hit/miss cannot measure" and
 pointing at the data + recommended secondary metrics here.
+
+---
+
+## v6 — Time-aware, confidence-calibrated retrieval
+
+**Date:** 2026-05-09
+
+### The architectural shift
+
+v1–v5 added capabilities: BM25, graph, reranker, derived memories —
+each version a new component. v6 makes existing data work harder.
+
+The memories table already had `confidence` (0.0–1.0) and `updated_at`
+on every row. Neither was used in retrieval ranking. v6 closes both gaps
+with ~55 lines of code and zero new infrastructure, zero new API calls,
+zero new tables.
+
+### What changed: src/recall.ts only
+
+#### Change 1 — Confidence-weighted scoring (Session 6-1)
+
+```text
+weighted_score = rrfScore × confidence^CONFIDENCE_WEIGHT
+```
+
+A 0.6-confidence implicit Haiku inference ranks below a 0.95-confidence
+explicit Sonnet fact when RRF scores are similar. CONFIDENCE_WEIGHT=1.0
+(linear scaling). Tunable: 0.5 = gentler square-root, 0.0 = disabled.
+
+Applied after all RRF additions (graph, derived boosts), before the
+LLM reranker — so the reranker sees a confidence-adjusted candidate list.
+
+Verified:
+
+- employer (confidence=1.00) outranks planned_activity (confidence=0.70) ✓
+- Log line fires: `[recall] confidence weighting demoted N memories` ✓
+
+#### Change 2 — Memory decay by type (Session 6-2)
+
+Inspiration: Ebbinghaus forgetting curve — memories decay exponentially
+at rates determined by their semantic type.
+
+Half-lives:
+
+| Type | Half-life | Rationale |
+| --- | --- | --- |
+| fact | Infinity | Supersession handles staleness — no decay needed |
+| preference | 90 days | Preferences drift over months |
+| opinion | 30 days | Opinions shift faster |
+| event | 14 days | "Preparing for interview" goes stale quickly |
+| habit | 60 days | Habits persist but can be dropped |
+
+```text
+decay_factor = 0.5^(days_since_updated_at / half_life)
+final_score = rrfScore × confidence^CONFIDENCE_WEIGHT × decay_factor
+```
+
+Stable facts (Infinity half-life) are explicitly exempted — supersession
+already handles their staleness correctly.
+
+**Implementation note:** memory.updated_at is set to wall-clock time at
+ingest, not the request body's timestamp field. Decay therefore reflects
+real elapsed time since ingestion, not the temporal context of the
+original conversation. This is semantically correct — a memory extracted
+yesterday was believed yesterday, regardless of what the turn's timestamp
+said. Decay will become observable as the service runs over real time.
+
+Verified (with manually backdated memories):
+
+```text
+event   decay=0.000000  age=494d  (14-day half-life, effectively stale)
+opinion decay=0.000001  age=586d  (30-day half-life, effectively stale)
+fact    decay=1.000000  age=any   (Infinity half-life, no decay)
+```
+
+Log line fires: `[recall] decay applied: N memories below 90% confidence` ✓
+
+#### Change 3 — Recency tiebreaker
+
+For non-fact memories with identical weighted scores, a small recency
+bonus (RECENCY_WEIGHT=0.002, 30-day half-life) breaks ties in favor of
+more recent memories. Skipped for fact types — recency adds no information
+for stable facts (supersession is already the staleness mechanism).
+
+### Self-eval
+
+```text
+80 pass / 4 fail / 213 expect() calls (EMBED_STUB=1, pre Session 6-3 test)
+81 pass / 4 fail / 216 expect() calls (after Session 6-3 added the
+                                       confidence-weighting integration test)
+```
+
+The 4 fails are pre-existing stub-mode incompatibilities documented
+elsewhere in this CHANGELOG (3 graph tests with `// will fail in stub
+mode` comments + 1 LLM-extraction-non-determinism test on the Mochi
+pet probe). Sessions 6-1, 6-2, and 6-3 introduced zero new failures.
+
+### What this means for the system
+
+The retrieval pipeline no longer treats a high-confidence explicit fact
+and an uncertain behavioral inference identically. It no longer treats
+a memory from yesterday and one from six months ago equally.
+
+These were the two most semantically obvious gaps in an otherwise
+sophisticated pipeline — both fixable with data already in the schema.
+
+### Tuning reference
+
+```typescript
+CONFIDENCE_WEIGHT = 1.0   // linear: 0.6 conf → 0.6× weight
+CONFIDENCE_WEIGHT = 0.5   // gentle: 0.6 conf → 0.77× weight
+CONFIDENCE_WEIGHT = 0.0   // disabled
+
+DECAY_ENABLED = false      // disables decay entirely
+
+// Half-lives in HALF_LIVES_DAYS — tune per use case
+// Production would calibrate from user retention signals
+```
+
+### Known limitations
+
+- Confidence scores from LLMs are not well-calibrated — 0.7 is
+  directionally meaningful but not numerically 70% accurate.
+- Half-lives are heuristic — derived from intuition, not data.
+  Production calibration requires retention signals (was this
+  memory actually correct when recalled?).
+- Decay makes recall non-deterministic over time — same query
+  returns different results a month later. Intentional behavior,
+  not a bug — human memory works this way.

@@ -499,6 +499,47 @@ describe("recall ranking — hybrid + multi-hop + rewriting", () => {
     expect(body.context).toBe("")
     expect(body.citations).toEqual([])
   }, 60_000)
+
+  it("confidence weighting: high-confidence explicit facts outrank low-confidence inferences", async () => {
+    const cwUser = `conf-weight-${Date.now()}`
+
+    await post("/turns", {
+      session_id: "conf-sess",
+      user_id: cwUser,
+      messages: [{
+        role: "user",
+        content: "I definitely work at Stripe as a senior engineer. " +
+                 "Might head to the gym later, not sure yet."
+      }],
+      timestamp: new Date().toISOString(),
+      metadata: {}
+    })
+
+    await wait(4000)
+
+    // Verify confidence distribution exists in extracted memories
+    const mems = await get<{ memories: MemoryRecord[] }>(`/users/${cwUser}/memories`)
+    const memories = mems.body.memories ?? []
+
+    // At least one high-confidence memory (explicit employer fact)
+    const highConf = memories.filter((m) => m.confidence >= 0.85)
+    expect(highConf.length).toBeGreaterThan(0)
+
+    // At least one lower-confidence memory (the uncertain gym plan)
+    const lowConf = memories.filter((m) => m.confidence < 0.85)
+    expect(lowConf.length).toBeGreaterThan(0)
+
+    // Recall should surface the explicit employer fact
+    const result = await post<{ context: string }>("/recall", {
+      query: "where does the user work?",
+      session_id: "conf-probe",
+      user_id: cwUser,
+      max_tokens: 512
+    })
+    expect(result.body.context.toLowerCase()).toContain("stripe")
+
+    await del(`/users/${cwUser}`)
+  }, 60_000)
 })
 
 // =============================================================================

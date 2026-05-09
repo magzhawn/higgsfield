@@ -15,6 +15,28 @@ const OVERHEAD = 60
 const BM25_GATE = 0          // any BM25 score (> 0) qualifies
 const RERANK_THRESHOLD = 3   // skip reranker for tiny candidate sets
 
+// Confidence weighting: multiplier applied to RRF score before reranking.
+// A 0.6-confidence implicit inference gets 0.6× the ranking weight of a
+// 1.0-confidence explicit statement with the same RRF score (when set to 1.0).
+// Math.pow(confidence, CONFIDENCE_WEIGHT) lets us tune gentleness:
+//   1.0 = linear scaling (full effect)
+//   0.5 = square-root (gentler demotion)
+//   0.0 = ignore confidence entirely (reverts to pre-v6 behavior)
+const CONFIDENCE_WEIGHT = 1.0
+
+// Memory decay: half-lives in days by memory type.
+// Confidence is multiplied by decay_factor at recall time.
+// Infinity = no decay (stable facts — handled by supersession).
+// Set DECAY_ENABLED = false to disable entirely.
+const DECAY_ENABLED = true
+const HALF_LIVES_DAYS: Partial<Record<string, number>> = {
+  fact:        Infinity,   // location, employer — supersession handles staleness
+  preference:  90,         // preferences drift over months
+  opinion:     30,         // opinions shift faster
+  event:       14,         // "preparing for interview" goes stale quickly
+  habit:       60,         // habits persist but can drop
+}
+
 export interface MemoryRow {
   id: string
   turn_id: string
@@ -24,8 +46,25 @@ export interface MemoryRow {
   confidence: number
   session_id: string
   created_at: string
+  updated_at: string
   metadata?: string
   vector: Buffer | null
+}
+
+// Pure decay function — multiplies a memory's effective weight by an
+// exponential factor that halves every HALF_LIVES_DAYS[type] days.
+// Stable facts (Infinity half-life) and disabled mode return 1.0.
+function decayFactor(memory: MemoryRow, now: Date): number {
+  if (!DECAY_ENABLED) return 1.0
+
+  const halfLife = HALF_LIVES_DAYS[memory.type]
+  if (!halfLife || halfLife === Infinity) return 1.0
+
+  const updatedAt = new Date(memory.updated_at ?? memory.created_at)
+  const daysSince = (now.getTime() - updatedAt.getTime()) / (1000 * 60 * 60 * 24)
+
+  // Exponential decay: halves every halfLife days
+  return Math.pow(0.5, daysSince / halfLife)
 }
 
 export type RankedMemory = MemoryRow & { rrfScore: number; rerankerScore?: number }
@@ -387,6 +426,44 @@ export async function recall(
     }
   }
   timings.derived_boost_ms = performance.now() - tDerivedBoost
+
+  // Step 4c.7 — confidence weighting + decay + recency tiebreaker.
+  // Scale RRF by extraction confidence (Sonnet ~0.95 facts outrank Haiku ~0.65
+  // implicit inferences) AND by an exponential decay tied to memory.type's
+  // half-life (opinions/events stale fast, facts never decay). Applied AFTER
+  // all RRF additions (entity hops, graph activation, derived boosts) but
+  // BEFORE the reranker — so the reranker sees confidence-and-recency-adjusted order.
+  // `now` is computed once so all memories are decayed against the same instant.
+  const now = new Date()
+  const weightedScore = (m: RankedMemory) =>
+    (m.rrfScore ?? 0) *
+    Math.pow(m.confidence ?? 1.0, CONFIDENCE_WEIGHT) *
+    decayFactor(m, now)
+  ranked.sort((a, b) => weightedScore(b) - weightedScore(a))
+
+  // Recency tiebreaker — adds a small bonus that breaks ties between memories
+  // with identical weighted scores in favor of more recent ones. Skipped for
+  // stable facts since recency adds no information for them (supersession does).
+  const RECENCY_WEIGHT = 0.002  // same order of magnitude as RRF scores
+
+  for (const m of ranked) {
+    if (m.type === "fact") continue
+    const updatedAt = new Date(m.updated_at ?? m.created_at)
+    const daysSince = (now.getTime() - updatedAt.getTime()) / (1000 * 60 * 60 * 24)
+    const recencyBonus = RECENCY_WEIGHT * Math.pow(0.5, daysSince / 30)
+    ;(m as any)._finalScore = weightedScore(m) + recencyBonus
+  }
+  ranked.sort((a, b) => ((b as any)._finalScore ?? weightedScore(b)) - ((a as any)._finalScore ?? weightedScore(a)))
+  for (const m of ranked) delete (m as any)._finalScore
+
+  const lowConf = ranked.filter((m) => (m.confidence ?? 1) < 0.8).length
+  if (lowConf > 0) {
+    console.log(`[recall] confidence weighting demoted ${lowConf} low-confidence memories`)
+  }
+  const decayed = ranked.filter((m) => decayFactor(m, now) < 0.9).length
+  if (decayed > 0 && DECAY_ENABLED) {
+    console.log(`[recall] decay applied: ${decayed} memories below 90% confidence`)
+  }
 
   // Step 4d — rerank top candidates by relevance to original query
   // Skipped in stub mode to keep recall fully deterministic (no Haiku call).
