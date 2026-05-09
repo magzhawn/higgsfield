@@ -10,9 +10,6 @@ const IDENTITY_KEYS = new Set([
 ])
 
 const OVERHEAD = 60
-// In stub mode: 0.20 keeps single hash-collision cosine (≈0.17) below gate
-// while genuine prefix-stem overlaps produce cosine ≥ 0.35.
-const COSINE_GATE = process.env.EMBED_STUB ? 0.20 : 0.40
 const BM25_GATE = 0          // any BM25 score (> 0) qualifies
 const RERANK_THRESHOLD = 3   // skip reranker for tiny candidate sets
 
@@ -188,6 +185,9 @@ export async function recall(
     setCachedMemories(userId, memories)
   }
   if (memories.length === 0) return { context: "", citations: [] }
+
+  const memoryCount = memories.length
+  const COSINE_GATE = process.env.EMBED_STUB ? 0.20 : memoryCount > 20 ? 0.45 : 0.40
 
   // Best-effort embed: 5s timeout prevents 429 retry waits from blocking recall.
   // Under rate pressure, rewrite variants and entity hops are skipped gracefully.
