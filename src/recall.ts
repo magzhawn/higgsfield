@@ -3,6 +3,7 @@ import { spreadActivation } from "./graph"
 import { q } from "./db"
 import { embed, unpack, cosineSimilarity } from "./embeddings"
 import { getCachedMemories, setCachedMemories, getCachedBM25, buildAndCacheBM25 } from "./cache"
+import { getDerivedContext, getDerivedBoosts } from "./derived"
 import type { Citation } from "./models"
 
 const IDENTITY_KEYS = new Set([
@@ -178,15 +179,36 @@ export async function recall(
   query: string,
   userId: string,
   maxTokens: number,
-  disableGraph = false
-): Promise<{ context: string; citations: Citation[] }> {
+  disableGraph = false,
+  disableDerived = false,
+  disableRewrite = false,
+  disableEntities = false,
+  disableRerank = false,
+): Promise<{ context: string; citations: Citation[]; timings: Record<string, number> }> {
+  const timings: Record<string, number> = {}
+  const tStart = performance.now()
   // Step 1 — fetch memories (use cache)
+  const tFetch = performance.now()
   let memories = getCachedMemories(userId) as MemoryRow[] | null
   if (!memories) {
     memories = q.getMemoriesByUser(userId) as MemoryRow[]
     setCachedMemories(userId, memories)
   }
-  if (memories.length === 0) return { context: "", citations: [] }
+  timings.fetch_ms = performance.now() - tFetch
+  if (memories.length === 0) return { context: "", citations: [], timings }
+
+  // Reserve up to 20% of the token budget for the derived "User profile"
+  // section. Computed up front so tier1/tier2 budget fill knows the cap.
+  let derivedSection = ""
+  let derivedTokens = 0
+  const tDerivedCtx = performance.now()
+  if (!disableDerived && !process.env.EMBED_STUB) {
+    const DERIVED_BUDGET = Math.floor(maxTokens * 0.20)
+    const { text, tokenCount } = getDerivedContext(userId, DERIVED_BUDGET)
+    derivedSection = text
+    derivedTokens = tokenCount
+  }
+  timings.derived_ctx_ms = performance.now() - tDerivedCtx
 
   const memoryCount = memories.length
   const COSINE_GATE = process.env.EMBED_STUB ? 0.20 : memoryCount > 20 ? 0.45 : 0.40
@@ -202,16 +224,22 @@ export async function recall(
   // Step 2 — rewrite query into multiple angles, embed all variants
   // Stub mode skips rewriting: LLM-generated variants can accidentally match
   // BM25 tokens in memories, making the noise test non-deterministic.
-  const queries = process.env.EMBED_STUB ? [query] : await rewriteQuery(query)
+  const tRewrite = performance.now()
+  const queries =
+    disableRewrite || process.env.EMBED_STUB ? [query] : await rewriteQuery(query)
+  timings.rewrite_ms = performance.now() - tRewrite
   // Original query embeds with full retry — must succeed for recall to work.
   // Rewrite variants use best-effort: skipped gracefully under rate pressure.
+  const tEmbed = performance.now()
   const primaryVec = await embed(queries[0], "query")
   const rewriteVecs = (
     await Promise.all(queries.slice(1).map(embedBestEffort))
   ).filter(Boolean) as Float32Array[]
   const queryVecs = [primaryVec, ...rewriteVecs]
+  timings.embed_ms = performance.now() - tEmbed
 
   // Step 3a — BM25 scoring across all query variants, keep highest score per memory
+  const tBm25 = performance.now()
   let bm25Engine = getCachedBM25(userId)
   if (!bm25Engine) bm25Engine = buildAndCacheBM25(userId, memories)
 
@@ -225,8 +253,10 @@ export async function recall(
   const bm25Scored = Array.from(bm25Map.entries())
     .map(([id, score]) => ({ id, score }))
     .sort((a, b) => b.score - a.score)
+  timings.bm25_ms = performance.now() - tBm25
 
   // Step 3b — cosine scoring across all query variants, keep highest score per memory
+  const tCosine = performance.now()
   const cosineMap = new Map<string, number>()
   for (const qVec of queryVecs) {
     for (const m of memories.filter((m) => m.vector)) {
@@ -238,6 +268,7 @@ export async function recall(
     .map(([id, score]) => ({ id, score }))
     .sort((a, b) => b.score - a.score)
     .slice(0, 20)
+  timings.cosine_ms = performance.now() - tCosine
 
   // bm25ScoreMap / cosineScoreMap aliases used by tier split
   const bm25ScoreMap = bm25Map
@@ -255,8 +286,10 @@ export async function recall(
   // Step 4b — multi-hop: extract entities from top results, search for connected memories
   // Stub mode skips extraction: stub cosine already handles cross-memory overlap
   // via prefix stemming, and skipping the Haiku call keeps tests deterministic.
+  const tEntities = performance.now()
   const top5 = ranked.slice(0, 5)
-  const entities = process.env.EMBED_STUB ? [] : await extractEntities(top5)
+  const entities =
+    disableEntities || process.env.EMBED_STUB ? [] : await extractEntities(top5)
 
   if (entities.length > 0) {
     const entityVecs = (
@@ -277,10 +310,12 @@ export async function recall(
 
     ranked.sort((a, b) => (rrfScores.get(b.id) ?? 0) - (rrfScores.get(a.id) ?? 0))
   }
+  timings.entities_ms = performance.now() - tEntities
 
   // Step 4c — spreading activation graph traversal from top RRF seeds
   // Skipped in stub mode (stub vectors aren't semantic) or when caller opts out
   // (used by the stress-test script for A/B comparison).
+  const tGraph = performance.now()
   if (!process.env.EMBED_STUB && !disableGraph) {
     const allMemoryIds = new Set(memories.map((m) => m.id))
     const seedIds = ranked.slice(0, 5).map((m) => m.id)
@@ -306,10 +341,31 @@ export async function recall(
       ranked.sort((a, b) => (b.rrfScore ?? 0) - (a.rrfScore ?? 0))
     }
   }
+  timings.graph_ms = performance.now() - tGraph
+
+  // Step 4c.5 — derived memory boosts: amplify memories linked to strong insights
+  // Applied BEFORE rerank so boosted memories are more likely to enter the
+  // rerank top-10 pool, which directly influences tier-1/tier-2 placement.
+  const tDerivedBoost = performance.now()
+  if (!disableDerived && !process.env.EMBED_STUB) {
+    const boosts = getDerivedBoosts(userId)
+    if (boosts.size > 0) {
+      for (const mem of ranked) {
+        const boost = boosts.get(mem.id) ?? 0
+        if (boost > 0) mem.rrfScore = (mem.rrfScore ?? 0) + boost
+      }
+      ranked.sort((a, b) => (b.rrfScore ?? 0) - (a.rrfScore ?? 0))
+      console.log(`[derived] applied boosts to ${boosts.size} memories`)
+    }
+  }
+  timings.derived_boost_ms = performance.now() - tDerivedBoost
 
   // Step 4d — rerank top candidates by relevance to original query
   // Skipped in stub mode to keep recall fully deterministic (no Haiku call).
-  const reranked = process.env.EMBED_STUB ? ranked : await rerank(query, ranked)
+  const tRerank = performance.now()
+  const reranked =
+    disableRerank || process.env.EMBED_STUB ? ranked : await rerank(query, ranked)
+  timings.rerank_ms = performance.now() - tRerank
 
   // Step 5 — tier split using RRF score + BM25 gate for tier 1
   const tier1: RankedMemory[] = []
@@ -331,7 +387,9 @@ export async function recall(
   // TODO: TIER 3 — recent turns (not implemented in v1)
 
   // Step 6 — greedy token-budget fill
-  let used = OVERHEAD
+  // `derivedTokens` is pre-charged so the User profile section never
+  // displaces tier-1 identity facts past the maxTokens cap.
+  let used = OVERHEAD + derivedTokens
   const tier1Lines: string[] = []
   const tier2Lines: string[] = []
   const citations: Citation[] = []
@@ -381,8 +439,9 @@ export async function recall(
   }
 
   // Step 7 — format output
-  if (tier1Lines.length === 0 && tier2Lines.length === 0) {
-    return { context: "", citations: [] }
+  if (tier1Lines.length === 0 && tier2Lines.length === 0 && !derivedSection) {
+    timings.total_ms = performance.now() - tStart
+    return { context: "", citations: [], timings }
   }
 
   let context = ""
@@ -421,7 +480,13 @@ export async function recall(
     }
   }
 
-  return { context, citations }
+  // Step 9 — prepend derived "User profile" section (if any).
+  // Placed at the top so behavioral signals frame the factual context.
+  const finalContext = derivedSection
+    ? (context ? `${derivedSection}\n\n${context}` : derivedSection)
+    : context
+  timings.total_ms = performance.now() - tStart
+  return { context: finalContext, citations, timings }
 }
 
 export async function searchMemories(

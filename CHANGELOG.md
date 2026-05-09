@@ -677,7 +677,6 @@ Gaps that are known and accepted for this submission:
 - Behavioral preference inference without trigger vocabulary (coffee)
 - Multi-hop requiring two low-scoring memories to connect
 
-
 ## v4 — Associative memory graph (spreading activation)
 
 **Date:** 2026-05-09
@@ -722,6 +721,7 @@ activation across the graph for up to 2 hops.
 ### Architecture
 
 **Write time (O(n × k) per turn):**
+
 ```
 new memories → already embedded → compare each against top-50
 existing memories by cosine → create edge if similarity ≥ 0.55 →
@@ -733,6 +733,7 @@ against 50 existing = 250 cosine comparisons = ~1ms. No additional
 API calls.
 
 **Read time (BFS, max 2 hops):**
+
 ```
 RRF top-5 seeds (activation=1.0) → fetch neighbors from graph →
 spread activation × 0.7 per hop × edge_strength → collect any memory
@@ -741,6 +742,7 @@ reaching activation ≥ 0.25 → boost its RRF score or add to ranked list
 ```
 
 The 0.7 decay and 0.25 threshold were chosen so that:
+
 - Hop 1 from a seed: 1.0 × 0.7 × edge_strength ≥ 0.25 requires edge_strength ≥ 0.36
 - Hop 2: 0.7 × 0.7 × strength₁ × strength₂ ≥ 0.25 requires both edges strong
 
@@ -782,6 +784,7 @@ where city and dog are in separate memories with no token overlap.
 | RRF + graph | ✓ | ✓ | city activated via dog→hiking→city edge chain |
 
 **Graph endpoint inspection** — `GET /graph/:userId` returns:
+
 ```json
 {
   "stats": { "nodeCount": 12, "edgeCount": 7, "avgDegree": 1.17 },
@@ -848,3 +851,263 @@ Not implemented — documented as a known gap.
   single high-confidence composite memory
 - Temporal edges: associations weighted by recency of co-occurrence,
   not just semantic similarity
+
+### Final submission verification (2026-05-09)
+
+Last-mile checks before submission. Documents what was actually
+exercised and one design observation that surfaced.
+
+**Verification gauntlet:**
+
+| Check | Result |
+| --- | --- |
+| `EMBED_STUB=1 bun test` | 27 pass / 1 fail (expected stub-incompatible graph connectivity test) |
+| Health endpoint after rebuild | `{"status":"ok"}` |
+| Persistence across `docker compose down && up` | Berlin recall survives — named volume `memory_data` works |
+| Supersession smoke test (Stripe→Notion, NYC→Berlin) | 2 keys with 2 versions each; recall returns current values, drops superseded ones |
+| Graph rebuild on 3-memory active set | 3 edges built; `relocation ↔ location` at 0.8746 (both mention Berlin) |
+| Docs surface (`grep "^## "`) | README has 9 sections; CHANGELOG has exactly v1–v4 |
+| `.env.example` | Documents `ANTHROPIC_API_KEY`, `VOYAGE_API_KEY`, `DB_PATH`, `MEMORY_AUTH_TOKEN`, `EMBED_STUB` |
+
+**Design observation — supersession masks per-turn graph building:**
+
+When two consecutive turns *exclusively contradict* prior facts (turn 1
+says "Stripe + NYC", turn 2 says "Notion + Berlin"), the incremental
+`buildAssociations` call after turn 2 finds zero edges. This is because
+extraction.ts supersedes the prior memories *in the same transaction
+that inserts the new ones*, so by the time `batchEmbedAndStore`
+fires `buildAssociations`, the only `active = 1` memories are the new
+ones — there are no prior active memories to associate against.
+
+This is correct behavior for the per-turn pass: superseded facts
+shouldn't pull new memories into a stale graph. It's also the
+motivation for the `POST /graph/:userId/rebuild` endpoint — when the
+caller wants pairwise edges across the *current active snapshot*
+(e.g., after a contradiction-heavy session), the rebuild walks every
+active memory pair and produces the up-to-date graph. In the smoke
+test the rebuild went from 0 edges to 3 edges on a 3-node graph
+(avg degree 2.0).
+
+The implication for production: rebuild on a periodic schedule
+(e.g., nightly) for users whose graphs may have decayed below their
+true connectivity due to long sequences of supersessions.
+
+**Final scaling-path documentation:**
+
+The README now ends with a Scaling path section explicitly mapping
+the eval-scale design to its production form: SQLite adjacency list
+→ sqlite-vec ANN → Neo4j + pgvector, with the HTTP contract held
+constant across all three tiers.
+
+**This is the version submitted.**
+
+---
+
+## v5 — Derived memories (Honcho-inspired behavioral layer)
+
+**Date:** 2026-05-09
+
+**Hypothesis:**
+
+Raw memories store *what happened*. Derived memories store *what it
+means about who the user is*. A query about how to explain something
+returns nothing from raw memories — but derived memories surface
+"user prefers code-first responses" even though the user never said
+that explicitly.
+
+Two predictions:
+
+1. **Profile enrichment.** A `## User profile` section appears in the
+   recall context for users with 3+ turns, surfacing implicit
+   behavioural patterns that raw retrieval cannot reach.
+2. **Graph amplification.** Raw memories that contributed to a
+   high-confidence derived insight get a small RRF boost at recall
+   time (boost = `0.002 × confidence × min(reinforcement_count, 5)`),
+   so memories that have proven meaningful across multiple
+   interactions are more likely to surface.
+
+Risk: derivation adds ~3 s of LLM latency. Mitigated by firing the
+pipeline fire-and-forget in `setTimeout(0)` after the 201 returns,
+plus confidence scoring and reinforcement counting to keep
+hallucinated insights out of the high-confidence band.
+
+**What was built:**
+
+| File | Role |
+| --- | --- |
+| `src/db.ts` | New `derived_memories` table + `idx_derived_user` index. Six prepared queries (`insertDerived`, `getDerivedByUser`, `getDerivedByCategory`, `reinforceDerived`, `deleteDerivedByUser`, `deleteDerivedBySession`). Inline DELETE for derived rows added to existing `deleteUser` / `deleteSession` transactions so cleanup stays atomic. |
+| `src/derived.ts` | New file. `deriveMemories(userId, newMemoryIds)` runs Haiku once over the user's last 30 memories, produces 0–N insights across six categories (`communication_style`, `cognitive_pattern`, `emotional_state`, `goal`, `constraint`, `relationship_pattern`). Word-overlap dedupe collapses near-duplicates and reinforces them instead (count++, confidence += 0.05, capped at 0.98). Skips itself in `EMBED_STUB` mode and never throws. Exports `getDerivedContext` (formatter for the `## User profile` section, max 2 insights per category, fits within a per-call token budget) and `getDerivedBoosts` (RRF score amplifier for raw memories that fed high-confidence reinforced insights). |
+| `src/recall.ts` | New `disableDerived` parameter. Reserves up to 20 % of `max_tokens` for the User profile section (computed before tier fill so identity facts never get displaced). Applies RRF boosts after RRF fusion, before reranking — so boosted memories are more likely to enter the rerank top-10 pool that drives tier-1/tier-2 placement. Profile section is prepended to the final context. |
+| `src/main.ts` | Captures `memoryIds` from `extractMemories()`. Fires `deriveMemories(userId, memoryIds)` via `setTimeout(0)` after the 201 returns — pipeline never blocks the request cycle. New `GET /users/:userId/derived` inspection endpoint. `disable_derived` flag plumbed through `/recall`. |
+| `src/models.ts` | `disable_derived: boolean` added to `RecallRequestSchema`. |
+| `scripts/derived_compare.ts` | New A/B script. Ingests a 9-turn corpus designed to reveal behavioural patterns (production pressure, code-first preference, systems thinking), waits 8 s for the async pipeline to drain, then probes 8 queries split into factual / behavioural / implicit, hitting `/recall` once with `disable_derived: true` and once with `false`. Reports hit rate, profile-section presence, citation count, latency. |
+
+**Architecture:**
+
+```
+POST /turns → extractMemories() (sync)
+            → 201 returned
+            → setTimeout(0) → deriveMemories()
+                              → fetch last 30 memories
+                              → Haiku JSON: 6 categories × N insights
+                              → for each insight:
+                                  reinforce existing (textSimilarity > 0.75)
+                                  OR INSERT new (UUID + source_memory_ids JSON)
+```
+
+```
+POST /recall → tier-1 / tier-2 RRF + rerank (existing pipeline)
+             → getDerivedContext(userId) → reserve up to 20 % of budget
+             → getDerivedBoosts(userId) → bump RRF scores of source memories
+             → context = "## User profile\n…\n\n## Known facts…\n\n## Relevant memories…"
+```
+
+The 0.002 boost magnitude was chosen so it changes ordering only when
+the underlying RRF scores are within ~0.005 of each other — i.e. the
+boost can flip ties but cannot promote a clearly irrelevant memory.
+
+**A/B comparison results** (`bun run scripts/derived_compare.ts`,
+9-turn behavioural corpus, real LLM, fresh user):
+
+```
+Phase 3 — Derived memories inspected:
+  33 derived memories across all 6 categories
+  communication_style: 5     cognitive_pattern: 6     goal: 6
+  constraint: 6              relationship_pattern: 7  emotional_state: 3
+  Top insight: "Prefers example-first, direct communication with minimal
+  theoretical preamble" (0.98 conf, x3 reinforcements)
+
+Phase 4 — A/B probes:
+  Query                                   Type        OFF   ON    Effect
+  ───────────────────────────────────────────────────────────────────────
+  where does the user work?               factual     ✓ 4c  ✓ 4c  same
+  what city does the user live in?        factual     ✗ 0c  ✓ 5c  +derived
+  how should I format a technical expl.   behavioral  ✓ 10c ✓ 7c  same  +profile
+  what communication style does this…?    behavioral  ✓ 6c  ✓ 6c  same  +profile
+  what is the user currently working on?  behavioral  ✗ 5c  ✓ 5c  +derived +profile
+  does this user prefer theory or…?       implicit    ✓ 6c  ✓ 6c  same  +profile
+  how does this user approach problem…?   implicit    ✓ 5c  ✓ 5c  same  +profile
+  is this user under time pressure?       implicit    ✓ 3c  ✓ 3c  same  +profile
+
+Summary
+  Overall hit rate:           6/8 → 8/8        (+2)
+  Behavioral/implicit:        5/6 → 6/6        (+1)
+  Profile section appears:    0/8 → 8/8        (+8)
+```
+
+**Hypothesis validation:**
+
+- **✓ Profile enrichment confirmed.** With derived ON, every probe
+  surfaces the `## User profile` section (8/8 vs 0/8 with derived
+  OFF). Derived memories reach reviewers that raw retrieval cannot.
+- **✓ Behavioural query improvement confirmed.** Two queries that
+  failed without derived memories (`what city does the user live
+  in?` and `what is the user currently working on?`) succeed with
+  derived memories on. The user-profile context primes the recall
+  ranker via prepended summary text and via the source-memory RRF
+  boost, both of which contribute.
+
+**Known limitations:**
+
+- Derivation lags extraction by ~3 s — a recall called within 5 s of
+  the triggering /turns may not yet see the new derived memory. The
+  comparison script accounts for this with an 8 s settle window.
+- Single-turn corpora produce few derivable patterns — the smoke
+  test (1 turn, "skip the theory…") still produced 5 insights, but
+  a single neutral turn often returns `{"insights": []}`. This is
+  by design: the prompt prefers silence over hallucination.
+- `emotional_state` is the noisiest category (always confidence
+  0.4–0.6 by prompt rule). It is excluded from RRF boosts entirely
+  (boost gate is confidence ≥ 0.75 + reinforcement_count ≥ 2).
+- `textSimilarity()` for dedupe is coarse word-overlap. Two
+  semantically equivalent insights that share fewer than 75 % of
+  their long words can both be inserted as separate rows instead of
+  one being reinforced. A semantic dedupe step would catch this but
+  costs another API call per insight.
+- Provenance edges between raw memories and derived memories were
+  designed but dropped: `memory_associations` enforces FOREIGN KEY
+  constraints to `memories(id)`, and a derived memory id is not a
+  memory id. The boost mechanism reads `derived_memories.source_memory_ids`
+  JSON directly instead, which is functionally equivalent and avoids
+  a schema migration.
+
+**Comparison to Honcho:**
+
+| Capability | This service | Honcho |
+| --- | --- | --- |
+| Async derivation pipeline | ✓ fire-and-forget setTimeout(0) | ✓ |
+| Multiple insight categories | ✓ 6 categories | ✓ |
+| Confidence + reinforcement | ✓ 0.0–1.0 + count, capped at 0.98 | ✓ |
+| Profile section in retrieval | ✓ `## User profile` prepended | ✓ |
+| Per-user inspection endpoint | ✓ `GET /users/:id/derived` | ✓ |
+| Cross-user collective insights | ✗ | ✓ |
+| Time-decayed emotional state | ✗ (low-confidence band only) | ✓ |
+| Persona splitting (work vs personal) | ✗ | ✓ |
+| Insight contradiction tracking | ✗ (we re-derive every turn) | ✓ |
+
+The gap is mostly around long-running profile maintenance. For an
+eval-scale single-user service, the derivation-on-every-turn approach
+is simpler and produces stronger profile signals from short corpora
+(33 derived memories from 9 turns).
+
+---
+
+**Post-hoc assessment — was it efficient?**
+
+The A/B numbers say yes (6/8 → 8/8 hit rate, profile in 8/8 responses)
+but the answer depends on which axis you measure.
+
+**Recall quality — modest but real.** Two additional queries answered
+correctly out of eight. Profile section present in every response.
+Measurable, but six of the eight queries worked without derived memories —
+the underlying retrieval was already strong on this corpus.
+
+**Latency — free at the request boundary.** Derivation adds ~3 s of
+Haiku time per turn, but it fires inside `setTimeout(0)` after the 201
+returns. The user-facing /turns latency is unchanged. The cost is paid
+in background API calls, not in request time.
+
+**Token budget — a real tax.** The profile section reserves up to 20 %
+of `max_tokens` before tier-1/tier-2 fill. On a 512-token recall, that
+is ~100 tokens reserved for profile, leaving 412 for facts. Tight
+budgets compress factual context to make room for behavioural framing.
+For a factual lookup workload this is a regression; for a coaching /
+therapy / long-running-assistant workload it is the point.
+
+**Signal quality — possibly too rich.** 33 derived memories from 9
+turns is ~3.6 insights per turn. The reinforcement dedupe collapses
+near-duplicates (same category, > 75 % word overlap), but rows still
+accumulate fast. At 100 turns per user the derived table would carry
+hundreds of rows that nobody prunes. A periodic GC of unreinforced
+insights below confidence 0.6 would keep this bounded — not yet
+implemented.
+
+**The honest gap — compensation vs. genuinely new knowledge.**
+
+The two queries that flipped from ✗ to ✓ are suspicious:
+
+- `what city does the user live in?` — Amsterdam was an explicit fact
+  stated in turn 1. It should have surfaced via raw retrieval. The
+  fact that it didn't without derived memories means the cosine gate
+  was holding it back, and the derived boost (or the prepended profile
+  text changing the rerank pool) just nudged it over.
+- `what is the user currently working on?` — `goal: scaling for 10x
+  traffic spike` was extracted as a raw memory. Same story: borderline
+  retrieval, not absent knowledge.
+
+Both flips are **retrieval-gate compensation, not knowledge surfaces**.
+A better-calibrated `COSINE_GATE` per memory-count tier would have
+caught both queries without any derived layer at all.
+
+**The defensible value is the profile section itself.** Insights like
+"prefers example-first, direct communication with minimal theoretical
+preamble" or "systems-oriented thinker focused on infrastructure and
+scalability" are genuinely new information — raw extraction will
+never store them because the user never said them. That signal is
+unreachable from the memories table by design, and the profile
+section is the only path to surfacing it. 8/8 responses carry that
+signal vs 0/8 without — that is the honest win.
+
+**One-sentence verdict:** the hit-rate improvement is likely a
+calibration artefact; the profile section is a genuine new capability
+worth its token cost for any non-factual workload.

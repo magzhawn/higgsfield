@@ -73,6 +73,23 @@ export function initDb(): void {
   db.run("CREATE INDEX IF NOT EXISTS idx_assoc_source ON memory_associations(source_id)")
   db.run("CREATE INDEX IF NOT EXISTS idx_assoc_target ON memory_associations(target_id)")
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS derived_memories (
+      id                   TEXT PRIMARY KEY,
+      user_id              TEXT NOT NULL,
+      category             TEXT NOT NULL,
+      insight              TEXT NOT NULL,
+      source_memory_ids    TEXT NOT NULL DEFAULT '[]',
+      confidence           REAL DEFAULT 0.7,
+      reinforcement_count  INTEGER DEFAULT 1,
+      last_reinforced_at   TEXT DEFAULT (datetime('now')),
+      active               INTEGER DEFAULT 1,
+      created_at           TEXT DEFAULT (datetime('now')),
+      updated_at           TEXT DEFAULT (datetime('now'))
+    )
+  `)
+  db.run("CREATE INDEX IF NOT EXISTS idx_derived_user ON derived_memories(user_id, active, category)")
+
   console.log(`DB ready at ${DB_PATH}`)
 }
 
@@ -166,6 +183,10 @@ export const q = {
       OR target_id IN (SELECT id FROM memories WHERE session_id = $sessionId)
     `).run({ $sessionId: sessionId })
     db.query(`
+      DELETE FROM derived_memories
+      WHERE user_id IN (SELECT DISTINCT user_id FROM turns WHERE session_id = $sessionId)
+    `).run({ $sessionId: sessionId })
+    db.query(`
       DELETE FROM embeddings WHERE memory_id IN (
         SELECT id FROM memories WHERE session_id = $sessionId
       )
@@ -180,6 +201,7 @@ export const q = {
       WHERE source_id IN (SELECT id FROM memories WHERE user_id = $userId)
       OR target_id IN (SELECT id FROM memories WHERE user_id = $userId)
     `).run({ $userId: userId })
+    db.query("DELETE FROM derived_memories WHERE user_id = $userId").run({ $userId: userId })
     db.query(`
       DELETE FROM embeddings WHERE memory_id IN (
         SELECT id FROM memories WHERE user_id = $userId
@@ -188,6 +210,48 @@ export const q = {
     db.query("DELETE FROM memories WHERE user_id = $userId").run({ $userId: userId })
     db.query("DELETE FROM turns WHERE user_id = $userId").run({ $userId: userId })
   }),
+
+  insertDerived: db.query(`
+    INSERT INTO derived_memories
+      (id, user_id, category, insight, source_memory_ids,
+       confidence, reinforcement_count)
+    VALUES
+      ($id, $user_id, $category, $insight, $source_memory_ids,
+       $confidence, $reinforcement_count)
+  `),
+
+  getDerivedByUser: db.query(`
+    SELECT * FROM derived_memories
+    WHERE user_id = $user_id AND active = 1
+    ORDER BY confidence DESC, reinforcement_count DESC
+  `),
+
+  getDerivedByCategory: db.query(`
+    SELECT * FROM derived_memories
+    WHERE user_id = $user_id AND category = $category AND active = 1
+    ORDER BY confidence DESC
+    LIMIT 3
+  `),
+
+  reinforceDerived: db.query(`
+    UPDATE derived_memories
+    SET reinforcement_count = reinforcement_count + 1,
+        confidence = MIN(0.98, confidence + 0.05),
+        last_reinforced_at = datetime('now'),
+        updated_at = datetime('now')
+    WHERE id = $id
+  `),
+
+  deleteDerivedByUser: db.query(`
+    DELETE FROM derived_memories WHERE user_id = $user_id
+  `),
+
+  deleteDerivedBySession: db.query(`
+    DELETE FROM derived_memories
+    WHERE user_id IN (
+      SELECT DISTINCT user_id FROM turns WHERE session_id = $session_id
+    )
+  `),
 }
 
 export const tx = (fn: () => void) => db.transaction(fn)()

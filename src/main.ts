@@ -12,6 +12,7 @@ import { extractMemories } from "./extraction"
 import { recall, searchMemories } from "./recall"
 import { embed, unpack, cosineSimilarity } from "./embeddings"
 import { invalidateUser } from "./cache"
+import { deriveMemories } from "./derived"
 
 const app = new Hono()
 
@@ -39,12 +40,27 @@ app.post("/turns", zValidator("json", TurnRequestSchema), async (c) => {
       $metadata: JSON.stringify(body.metadata),
     })
     console.log(`[turns] persisted in ${(performance.now() - t0).toFixed(0)}ms`)
+    let memoryIds: string[] = []
     if (body.user_id) {
-      await extractMemories(id, body.user_id, body.session_id, body.messages)
+      memoryIds = await extractMemories(id, body.user_id, body.session_id, body.messages)
       invalidateUser(body.user_id)
     }
     console.log(`[turns] extraction done in ${(performance.now() - t0).toFixed(0)}ms`)
     console.log(`[turns] total ${(performance.now() - t0).toFixed(0)}ms`)
+
+    // Fire-and-forget derivation — never awaited, never blocks the 201.
+    // setTimeout(0) hands off after the response is queued. Derived state
+    // is read directly from derived_memories at recall time, so no cache
+    // invalidation is needed when this completes.
+    if (body.user_id && !process.env.EMBED_STUB) {
+      const userId = body.user_id
+      setTimeout(() => {
+        deriveMemories(userId, memoryIds).catch((err) =>
+          console.error("[derived] background derivation error:", err?.message ?? err),
+        )
+      }, 0)
+    }
+
     return c.json({ id }, 201)
   } catch (err) {
     console.error(err)
@@ -55,11 +71,19 @@ app.post("/turns", zValidator("json", TurnRequestSchema), async (c) => {
 app.post("/recall", zValidator("json", RecallRequestSchema), async (c) => {
   try {
     const t0 = performance.now()
-    const { query, user_id, max_tokens, disable_graph } = c.req.valid("json")
+    const {
+      query, user_id, max_tokens,
+      disable_graph, disable_derived,
+      disable_rewrite, disable_entities, disable_rerank,
+    } = c.req.valid("json")
     if (!user_id) return c.json({ context: "", citations: [] })
-    const { context, citations } = await recall(query, user_id, max_tokens, disable_graph)
+    const { context, citations, timings } = await recall(
+      query, user_id, max_tokens,
+      disable_graph, disable_derived,
+      disable_rewrite, disable_entities, disable_rerank,
+    )
     console.log(`[recall] ${(performance.now() - t0).toFixed(0)}ms`)
-    return c.json({ context, citations })
+    return c.json({ context, citations, timings })
   } catch (err) {
     console.error(err)
     return c.json({ context: "", citations: [] })
@@ -163,6 +187,17 @@ app.delete("/users/:userId", async (c) => {
   } catch (err) {
     console.error(err)
     return c.json({ error: "internal error" }, 500)
+  }
+})
+
+app.get("/users/:userId/derived", async (c) => {
+  try {
+    const { userId } = c.req.param()
+    const derived = q.getDerivedByUser.all({ $user_id: userId })
+    return c.json({ derived_memories: derived })
+  } catch (err) {
+    console.error("Derived memories fetch error:", err)
+    return c.json({ derived_memories: [] })
   }
 })
 

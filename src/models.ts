@@ -27,6 +27,10 @@ export const RecallRequestSchema = z.object({
   user_id: z.string().nullable().optional(),
   max_tokens: z.number().int().min(64).max(8192).default(1024),
   disable_graph: z.boolean().optional().default(false),
+  disable_derived: z.boolean().optional().default(false),
+  disable_rewrite: z.boolean().optional().default(false),
+  disable_entities: z.boolean().optional().default(false),
+  disable_rerank: z.boolean().optional().default(false),
 })
 export type RecallRequest = z.infer<typeof RecallRequestSchema>
 
