@@ -483,10 +483,10 @@ TypeScript narrowing note: the `.map()` step produces elements with `rerankerSco
 When at least one opinion memory passes the relevance gate and appears in the recall output, the service fetches all memories for the user (including inactive), walks the `supersedes` pointer chain for each surfaced opinion, and appends a chronological arc to the context:
 
 ```text
-## Opinion history
-  [2024-03-01] loves TypeScript, best language for large teams
-  [2024-03-08] TypeScript generics are annoying, complexity outweighs benefits
-  [2024-03-15] TypeScript is fine for big projects (current)
+    ## Opinion history
+      [2024-03-01] loves TypeScript, best language for large teams
+      [2024-03-08] TypeScript generics are annoying, complexity outweighs benefits
+      [2024-03-15] TypeScript is fine for big projects (current)
 ```
 
 Oldest ancestor first, current stance last. Appended after `## Known facts` and `## Relevant memories` sections so it doesn't crowd out identity facts. Only adds the arc when there is at least one superseded ancestor — a single-entry opinion (no prior stance) produces no history section.
@@ -525,7 +525,7 @@ Ran 23 tests across 2 files. [39.44s]
 
 ---
 
-## Stress test — Maya Patel scenario (26 probes, 6 sessions)
+### Stress test — Maya Patel scenario (26 probes, 6 sessions)
 
 **Date:** 2026-05-09
 

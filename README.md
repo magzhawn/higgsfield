@@ -179,6 +179,18 @@ The supersession chain is inspectable end-to-end: each memory's `supersedes` fie
 
 `COSINE_GATE = 0.40` was calibrated empirically against Voyage `voyage-3-lite` vectors. Unrelated English sentences score 0.26–0.28; relevant memories score 0.40+. The 0.12 margin makes the gate stable.
 
+## Scaling path
+
+**Current (eval scale):** SQLite adjacency list for the memory graph, in-memory cosine search for vector retrieval, in-process Map caches. Handles hundreds of memories per user with sub-second recall latency on a paid embedding API.
+
+**At ~10k memories per user:** Replace in-memory cosine scan with sqlite-vec ANN indexing. Edge building switches from exhaustive pairwise to approximate nearest neighbor. The `/graph/:userId/rebuild` endpoint triggers a full reindex.
+
+**At production scale:**
+
+- Migrate `memory_associations` to Neo4j. The adjacency list schema maps directly to a property graph. Cypher replaces the BFS implementation in `graph.ts`. PageRank becomes available for ranking memories by network centrality — a better signal than RRF position for long-lived users with dense memory graphs.
+- Replace SQLite with Postgres + pgvector for ANN search and horizontal scaling.
+- The HTTP contract and extraction pipeline are unchanged — only the storage and retrieval layers swap out.
+
 ## Failure modes
 
 **Missing `ANTHROPIC_API_KEY`:** `/turns` returns 201 but with no extracted memories (extraction catches the error and returns an empty array). The turn is persisted. `/recall` returns empty context.
