@@ -179,7 +179,7 @@ Ran 18 tests across 2 files. [~205s]
 
 ---
 
-## v2-2 — BM25 + RRF + noise gate (3 attempts)
+### v2-2 — BM25 + RRF + noise gate (3 attempts)
 
 **Date:** 2026-05-09
 
@@ -263,7 +263,7 @@ Cosine thresholds on `voyage-3-lite` are stable and calibratable because the mod
 
 ---
 
-## v2-3 — Per-item embedding fallback
+### v2-3 — Per-item embedding fallback
 
 **Date:** 2026-05-09
 
@@ -283,7 +283,7 @@ Cosine thresholds on `voyage-3-lite` are stable and calibratable because the mod
 
 ---
 
-## v2-4 — Query rewriting
+### v2-4 — Query rewriting
 
 **Date:** 2026-05-09
 
@@ -301,7 +301,7 @@ Cosine thresholds on `voyage-3-lite` are stable and calibratable because the mod
 
 ---
 
-## v2-5 — Multi-hop retrieval
+### v2-5 — Multi-hop retrieval
 
 **Date:** 2026-05-09
 
@@ -325,7 +325,7 @@ Cosine thresholds on `voyage-3-lite` are stable and calibratable because the mod
 
 ---
 
-## v2 — Self-eval and gap analysis
+### v2 — Self-eval and gap analysis
 
 **Date:** 2026-05-09
 
@@ -381,7 +381,7 @@ Cross-memory queries ("what city does the person with the dog named Biscuit live
 
 ---
 
-## v2-dev — Swagger UI + stub embedder for fast testing
+### v2-dev — Swagger UI + stub embedder for fast testing
 
 **Date:** 2026-05-09
 
