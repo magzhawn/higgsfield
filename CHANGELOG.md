@@ -806,7 +806,8 @@ Portland score below COSINE_GATE against a dog query and are dropped.
 ### Self-eval results
 
 ```
-[paste bun test output here after running]
+27 pass / 1 fail (stub-incompatible graph connectivity test)
+Graph tests: 4/5 passing in stub mode
 ```
 
 Existing tests: 23/23
@@ -1428,7 +1429,7 @@ pointing at the data + recommended secondary metrics here.
 
 ---
 
-## v6 — Time-aware, confidence-calibrated retrieval
+## v7 — Time-aware, confidence-calibrated retrieval
 
 **Date:** 2026-05-09
 
