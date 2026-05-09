@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk"
+import { spreadActivation } from "./graph"
 import { q } from "./db"
 import { embed, unpack, cosineSimilarity } from "./embeddings"
 import { getCachedMemories, setCachedMemories, getCachedBM25, buildAndCacheBM25 } from "./cache"
@@ -176,7 +177,8 @@ function fetchOpinionHistory(
 export async function recall(
   query: string,
   userId: string,
-  maxTokens: number
+  maxTokens: number,
+  disableGraph = false
 ): Promise<{ context: string; citations: Citation[] }> {
   // Step 1 — fetch memories (use cache)
   let memories = getCachedMemories(userId) as MemoryRow[] | null
@@ -276,7 +278,36 @@ export async function recall(
     ranked.sort((a, b) => (rrfScores.get(b.id) ?? 0) - (rrfScores.get(a.id) ?? 0))
   }
 
-  // Step 4c — rerank top candidates by relevance to original query
+  // Step 4c — spreading activation graph traversal from top RRF seeds
+  // Skipped in stub mode (stub vectors aren't semantic) or when caller opts out
+  // (used by the stress-test script for A/B comparison).
+  if (!process.env.EMBED_STUB && !disableGraph) {
+    const allMemoryIds = new Set(memories.map((m) => m.id))
+    const seedIds = ranked.slice(0, 5).map((m) => m.id)
+    const activated = spreadActivation(seedIds, allMemoryIds)
+
+    if (activated.length > 0) {
+      console.log(`[graph] spreading activation: ${activated.length} memories activated`)
+      const rankedIds = new Set(ranked.map((m) => m.id))
+
+      for (const assoc of activated) {
+        if (rankedIds.has(assoc.memoryId)) {
+          const existing = ranked.find((m) => m.id === assoc.memoryId)!
+          existing.rrfScore = (existing.rrfScore ?? 0) + assoc.activation * 0.01
+        } else {
+          const mem = memories.find((m) => m.id === assoc.memoryId)
+          if (mem) {
+            ranked.push({ ...mem, rrfScore: assoc.activation * 0.012 })
+            rankedIds.add(assoc.memoryId)
+          }
+        }
+      }
+
+      ranked.sort((a, b) => (b.rrfScore ?? 0) - (a.rrfScore ?? 0))
+    }
+  }
+
+  // Step 4d — rerank top candidates by relevance to original query
   // Skipped in stub mode to keep recall fully deterministic (no Haiku call).
   const reranked = process.env.EMBED_STUB ? ranked : await rerank(query, ranked)
 

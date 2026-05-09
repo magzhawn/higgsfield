@@ -4,7 +4,8 @@
     "start": "bun src/main.ts",
     "dev": "bun --watch src/main.ts",
     "test": "bun test",
-    "test:fast": "docker compose -f docker-compose.yml -f docker-compose.test.yml down -v && docker compose -f docker-compose.yml -f docker-compose.test.yml up --build -d && sleep 4 && bun test"
+    "test:fast": "docker compose -f docker-compose.yml -f docker-compose.test.yml down -v && docker compose -f docker-compose.yml -f docker-compose.test.yml up --build -d && sleep 4 && bun test",
+    "graph:compare": "bun run scripts/graph_compare.ts"
   },
   "dependencies": {
     "hono": "^4.5.0",

@@ -12,6 +12,7 @@ interface MemoryDoc {
 const embedCache = new Map<string, Float32Array>()
 const memoriesCache = new Map<string, any[]>()
 const bm25Cache = new Map<string, BM25Engine>()
+const graphCache = new Map<string, Map<string, number>>()
 
 export function getCachedEmbed(text: string): Float32Array | null {
   return embedCache.get(text) ?? null
@@ -38,9 +39,19 @@ export function setCachedBM25(userId: string, index: BM25Engine): void {
   bm25Cache.set(userId, index)
 }
 
+export function getCachedNeighbors(memoryId: string): Map<string, number> | null {
+  return graphCache.get(memoryId) ?? null
+}
+
+export function setCachedNeighbors(memoryId: string, neighbors: Map<string, number>): void {
+  graphCache.set(memoryId, neighbors)
+}
+
 export function invalidateUser(userId: string): void {
   memoriesCache.delete(userId)
   bm25Cache.delete(userId)
+  // graph cache is keyed by memoryId, not userId — clear all (small, rebuilt quickly)
+  graphCache.clear()
 }
 
 export function buildAndCacheBM25(userId: string, memories: MemoryDoc[]): BM25Engine {

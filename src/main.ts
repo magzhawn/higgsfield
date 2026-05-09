@@ -55,9 +55,9 @@ app.post("/turns", zValidator("json", TurnRequestSchema), async (c) => {
 app.post("/recall", zValidator("json", RecallRequestSchema), async (c) => {
   try {
     const t0 = performance.now()
-    const { query, user_id, max_tokens } = c.req.valid("json")
+    const { query, user_id, max_tokens, disable_graph } = c.req.valid("json")
     if (!user_id) return c.json({ context: "", citations: [] })
-    const { context, citations } = await recall(query, user_id, max_tokens)
+    const { context, citations } = await recall(query, user_id, max_tokens, disable_graph)
     console.log(`[recall] ${(performance.now() - t0).toFixed(0)}ms`)
     return c.json({ context, citations })
   } catch (err) {
@@ -163,6 +163,40 @@ app.delete("/users/:userId", async (c) => {
   } catch (err) {
     console.error(err)
     return c.json({ error: "internal error" }, 500)
+  }
+})
+
+app.get("/graph/:userId", async (c) => {
+  const { userId } = c.req.param()
+  try {
+    const { getGraphStats } = await import("./graph")
+    const stats = getGraphStats(userId)
+    const topAssociations = db.query(`
+      SELECT m1.key as source_key, m1.value as source_value,
+             m2.key as target_key, m2.value as target_value, a.strength
+      FROM memory_associations a
+      JOIN memories m1 ON m1.id = a.source_id
+      JOIN memories m2 ON m2.id = a.target_id
+      WHERE m1.user_id = $user_id
+      ORDER BY a.strength DESC
+      LIMIT 20
+    `).all({ $user_id: userId })
+    return c.json({ stats, top_associations: topAssociations })
+  } catch (err) {
+    console.error("Graph stats error:", err)
+    return c.json({ stats: { nodeCount: 0, edgeCount: 0, avgDegree: 0 }, top_associations: [] })
+  }
+})
+
+app.post("/graph/:userId/rebuild", async (c) => {
+  const { userId } = c.req.param()
+  try {
+    const { rebuildGraph } = await import("./graph")
+    const result = await rebuildGraph(userId)
+    return c.json({ rebuilt: true, userId, ...result })
+  } catch (err: any) {
+    console.error("Graph rebuild error:", err)
+    return c.json({ error: "rebuild failed" }, 500)
   }
 })
 

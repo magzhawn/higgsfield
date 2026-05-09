@@ -1,5 +1,6 @@
 import { VoyageAIClient } from "voyageai"
 import { q } from "./db"
+import { buildAssociations } from "./graph"
 
 const embedCache = new Map<string, Float32Array>()
 
@@ -126,7 +127,8 @@ function insertEmbedding(memoryId: string, vec: Float32Array): void {
 }
 
 export async function batchEmbedAndStore(
-  items: Array<{ memoryId: string; value: string }>
+  items: Array<{ memoryId: string; value: string }>,
+  userId: string
 ): Promise<void> {
   if (items.length === 0) return
 
@@ -141,6 +143,7 @@ export async function batchEmbedAndStore(
   if (!process.env.VOYAGE_API_KEY) throw new Error("VOYAGE_API_KEY not configured")
 
   let successCount = 0
+  const memoryIds = items.map((i) => i.memoryId)
 
   // Happy path: one batch call for all items
   try {
@@ -154,6 +157,7 @@ export async function batchEmbedAndStore(
         successCount++
       }
       console.log(`[embed] ${successCount}/${items.length} memories embedded`)
+      if (successCount > 0) buildAssociations(memoryIds, userId)
       return
     }
     console.warn(`Batch embed returned ${data.length}/${items.length} results, falling back to per-item`)
@@ -185,4 +189,5 @@ export async function batchEmbedAndStore(
   }
 
   console.log(`[embed] ${successCount}/${items.length} memories embedded`)
+  if (successCount > 0) buildAssociations(memoryIds, userId)
 }

@@ -141,7 +141,7 @@ export async function extractMemories(
       embedItems.push({ memoryId, value: memory.value })
     }
 
-    await batchEmbedAndStore(embedItems)
+    await batchEmbedAndStore(embedItems, userId)
     return insertedIds
   } catch (err) {
     console.error("extractMemories failed:", err)

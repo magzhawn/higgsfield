@@ -59,6 +59,20 @@ export function initDb(): void {
   db.run("CREATE INDEX IF NOT EXISTS idx_memories_key  ON memories(user_id, key, active)")
   db.run("CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id)")
 
+  db.run(`
+    CREATE TABLE IF NOT EXISTS memory_associations (
+      id          TEXT PRIMARY KEY,
+      source_id   TEXT NOT NULL,
+      target_id   TEXT NOT NULL,
+      strength    REAL NOT NULL,
+      created_at  TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (source_id) REFERENCES memories(id),
+      FOREIGN KEY (target_id) REFERENCES memories(id)
+    )
+  `)
+  db.run("CREATE INDEX IF NOT EXISTS idx_assoc_source ON memory_associations(source_id)")
+  db.run("CREATE INDEX IF NOT EXISTS idx_assoc_target ON memory_associations(target_id)")
+
   console.log(`DB ready at ${DB_PATH}`)
 }
 
@@ -113,12 +127,44 @@ export const q = {
       UPDATE memories SET active = 0, updated_at = datetime('now') WHERE id = $id
     `).run({ $id: id }),
 
+  insertAssociation: db.query(`
+    INSERT OR REPLACE INTO memory_associations (id, source_id, target_id, strength)
+    VALUES ($id, $source_id, $target_id, $strength)
+  `),
+
+  getAssociations: db.query(`
+    SELECT target_id, strength FROM memory_associations
+    WHERE source_id = $source_id AND strength >= $min_strength
+    UNION
+    SELECT source_id as target_id, strength FROM memory_associations
+    WHERE target_id = $source_id AND strength >= $min_strength
+    ORDER BY strength DESC
+    LIMIT 20
+  `),
+
+  deleteUserAssociations: db.query(`
+    DELETE FROM memory_associations
+    WHERE source_id IN (SELECT id FROM memories WHERE user_id = $user_id)
+    OR target_id IN (SELECT id FROM memories WHERE user_id = $user_id)
+  `),
+
+  deleteSessionAssociations: db.query(`
+    DELETE FROM memory_associations
+    WHERE source_id IN (SELECT id FROM memories WHERE session_id = $session_id)
+    OR target_id IN (SELECT id FROM memories WHERE session_id = $session_id)
+  `),
+
   getTurnsBySession: (sessionId: string) =>
     db.query(`
       SELECT * FROM turns WHERE session_id = $sessionId ORDER BY created_at ASC
     `).all({ $sessionId: sessionId }),
 
   deleteSession: db.transaction((sessionId: string) => {
+    db.query(`
+      DELETE FROM memory_associations
+      WHERE source_id IN (SELECT id FROM memories WHERE session_id = $sessionId)
+      OR target_id IN (SELECT id FROM memories WHERE session_id = $sessionId)
+    `).run({ $sessionId: sessionId })
     db.query(`
       DELETE FROM embeddings WHERE memory_id IN (
         SELECT id FROM memories WHERE session_id = $sessionId
@@ -129,6 +175,11 @@ export const q = {
   }),
 
   deleteUser: db.transaction((userId: string) => {
+    db.query(`
+      DELETE FROM memory_associations
+      WHERE source_id IN (SELECT id FROM memories WHERE user_id = $userId)
+      OR target_id IN (SELECT id FROM memories WHERE user_id = $userId)
+    `).run({ $userId: userId })
     db.query(`
       DELETE FROM embeddings WHERE memory_id IN (
         SELECT id FROM memories WHERE user_id = $userId

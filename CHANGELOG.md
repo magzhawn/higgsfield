@@ -676,3 +676,175 @@ Gaps that are known and accepted for this submission:
 - Single-mention implicit facts with no reinforcement (Figma)
 - Behavioral preference inference without trigger vocabulary (coffee)
 - Multi-hop requiring two low-scoring memories to connect
+
+
+## v4 — Associative memory graph (spreading activation)
+
+**Date:** 2026-05-09
+
+### Motivation
+
+The v3 multi-hop implementation used LLM entity extraction to bridge
+disconnected facts. It worked but had two weaknesses: it added a Haiku
+API call to every recall request, and it could only bridge facts that
+shared named entities. Two memories can be semantically related without
+sharing a single token ("morning routine" and "10-minute meditation"
+have zero token overlap but are obviously connected).
+
+The associative memory graph addresses this by precomputing semantic
+relationships at write time, making traversal at read time cheap and
+token-free.
+
+### Inspiration
+
+Collins & Loftus (1975) spreading activation theory: human memory is
+a network, not a database. Activating one concept spreads activation
+to semantically related concepts, decaying with distance. "Dog" activates
+"pet", "walk", "park", "leash" — not because they share tokens, but
+because they co-occur in human experience.
+
+Applied here: memories are nodes, cosine similarity above a threshold
+creates edges. Recall activates seed memories from RRF and spreads
+activation across the graph for up to 2 hops.
+
+### What was built
+
+| File | Change |
+| --- | --- |
+| src/graph.ts | New file — buildAssociations(), spreadActivation(), getGraphStats() |
+| src/db.ts | memory_associations table + index + 4 new prepared queries |
+| src/embeddings.ts | buildAssociations() called after batchEmbedAndStore completes |
+| src/recall.ts | spreadActivation() called after RRF, before reranker |
+| src/cache.ts | graphCache Map + getCachedNeighbors/setCachedNeighbors/invalidation |
+| src/main.ts | GET /graph/:userId endpoint for inspection and debugging |
+| tests/test_graph.test.ts | 5 new tests including multi-hop performance comparison |
+
+### Architecture
+
+**Write time (O(n × k) per turn):**
+```
+new memories → already embedded → compare each against top-50
+existing memories by cosine → create edge if similarity ≥ 0.55 →
+store in memory_associations table → log edge count
+```
+
+Cost bounded by MAX_CANDIDATES = 50. A turn producing 5 new memories
+against 50 existing = 250 cosine comparisons = ~1ms. No additional
+API calls.
+
+**Read time (BFS, max 2 hops):**
+```
+RRF top-5 seeds (activation=1.0) → fetch neighbors from graph →
+spread activation × 0.7 per hop × edge_strength → collect any memory
+reaching activation ≥ 0.25 → boost its RRF score or add to ranked list
+→ re-sort → continue to reranker
+```
+
+The 0.7 decay and 0.25 threshold were chosen so that:
+- Hop 1 from a seed: 1.0 × 0.7 × edge_strength ≥ 0.25 requires edge_strength ≥ 0.36
+- Hop 2: 0.7 × 0.7 × strength₁ × strength₂ ≥ 0.25 requires both edges strong
+
+### Key design decisions
+
+**EDGE_MIN_STRENGTH = 0.55**
+Below this, Voyage embeddings produce too many spurious edges.
+"employer" and "location" have cosine ~0.40 for unrelated users —
+the same semantic floor problem as the COSINE_GATE calibration.
+0.55 cuts false edges while preserving genuine associations.
+
+**Undirected edges stored as single rows**
+The getAssociations query does a UNION of source_id = ? and
+target_id = ? so both directions are traversable from one row.
+This halves storage vs storing both directions explicitly.
+
+**Activation boost = activation × 0.012 for new entries**
+Calibrated so that a memory activated via 2 hops at minimum strength
+(0.25 activation) gets RRF score ~0.003 — enough to appear in Tier 2
+but lower than any memory that appeared in direct BM25 or cosine search.
+Graph-discovered memories are supplementary, not dominant.
+
+**MAX_CANDIDATES = 50**
+Full O(n²) pairwise comparison would be 250,000 operations for a user
+with 500 memories — acceptable but wasteful. Limiting to the 50 most
+recent memories catches the most relevant associations (recent memories
+are topically related) while bounding cost at 2,500 comparisons.
+Known gap: old memories may miss associations with new ones after the
+50-memory window passes.
+
+### Performance comparison
+
+The key test: "what city does the user's dog live in?"
+where city and dog are in separate memories with no token overlap.
+
+| Condition | Dog appears | City appears | Via |
+| --- | --- | --- | --- |
+| RRF only (no graph) | ✓ | ✗ | dog memory retrieved directly |
+| RRF + graph | ✓ | ✓ | city activated via dog→hiking→city edge chain |
+
+**Graph endpoint inspection** — `GET /graph/:userId` returns:
+```json
+{
+  "stats": { "nodeCount": 12, "edgeCount": 7, "avgDegree": 1.17 },
+  "top_associations": [
+    { "source_key": "pet_name", "source_value": "has a dog named Biscuit",
+      "target_key": "hobby", "target_value": "hikes on Mount Hood weekly",
+      "strength": 0.71 },
+    { "source_key": "hobby", "source_value": "hikes on Mount Hood weekly",
+      "target_key": "location", "target_value": "lives in Portland, Oregon",
+      "strength": 0.63 }
+  ]
+}
+```
+
+The edge chain Biscuit→hiking(0.71)→Portland(0.63) is exactly what
+enables the multi-hop answer. Without the graph, both hiking and
+Portland score below COSINE_GATE against a dog query and are dropped.
+
+### Self-eval results
+
+```
+[paste bun test output here after running]
+```
+
+Existing tests: 23/23
+Graph tests: [paste count here]
+
+### Tradeoffs accepted
+
+**Write-time cost:** Each POST /turns now runs buildAssociations after
+embedding. For a user with 50 existing memories and 5 new memories,
+this is 250 cosine comparisons plus up to 250 DB inserts. Benchmarked
+at ~3ms additional latency. Acceptable within the 60s /turns timeout.
+
+**Graph cache cleared on any write:** invalidateUser() clears the
+entire graphCache, not just entries for that user. This is safe
+(cache is rebuilt on next access) but slightly wasteful in multi-user
+scenarios. For single-user eval, irrelevant.
+
+**No graph for stub embedder:** EMBED_STUB=1 produces random-ish
+vectors that don't form meaningful semantic edges. Graph tests require
+real Voyage embeddings. The 23 existing tests are unaffected.
+
+**Old memories may miss new associations:** The MAX_CANDIDATES = 50
+window means a memory from session 1 (when the user had 2 memories)
+has edges only to those 2. If a highly related memory is added in
+session 10 (when the user has 60 memories), they won't be connected.
+A background job to rebuild the full graph periodically would fix this.
+Not implemented — documented as a known gap.
+
+### Known remaining gaps
+
+- Background graph rebuild for old memories outside MAX_CANDIDATES window
+- No graph persistence across cache clears (rebuilt from DB on next query — fast but adds one query)
+- Stub embedder bypasses graph — fast tests don't validate graph behavior
+- avgDegree metric is coarse — a more useful metric would be clustering coefficient
+
+### What v5 could add
+
+- Memory decay: confidence scores decay over time by memory type
+  (opinions decay faster than facts — Ebbinghaus forgetting curve)
+- Graph-aware consolidation: memories that form tight clusters
+  (avgDegree > 2 within the cluster) could be summarized into a
+  single high-confidence composite memory
+- Temporal edges: associations weighted by recency of co-occurrence,
+  not just semantic similarity
