@@ -125,12 +125,12 @@ echo "════════════════════════�
 ingest "${SESSION_BASE}-1" "2025-01-05" \
   "I just joined Vercel as a staff engineer — super excited, been following their work for years. We're based in San Francisco, my partner Lena and I moved here from Toronto two years ago. She's a UX designer at Figma which is kind of perfect. I'm working on the edge runtime team, mostly TypeScript all day. Honestly TypeScript is the best thing to happen to JavaScript — I don't know how people built large systems without it." \
   "Vercel is doing amazing work. How are you finding San Francisco compared to Toronto?" > /dev/null
-sleep 22
+sleep 1
 
 ingest "${SESSION_BASE}-1" "2025-01-05" \
   "San Francisco is expensive but worth it for the network. One thing that helps — I've been vegan for about four years now, and the food scene here is incredible for it. Also way more hiking than Toronto. I usually go every Sunday with our dog Churro, he's a 3-year-old golden retriever." \
   "A vegan golden retriever owner on the edge runtime team — that's a very specific San Francisco archetype." > /dev/null
-sleep 22
+sleep 1
 
 echo "Session 1 done."
 
@@ -146,12 +146,12 @@ echo "════════════════════════�
 ingest "${SESSION_BASE}-2" "2025-02-10" \
   "Six weeks at Vercel. The edge runtime work is fascinating but I'm starting to feel the TypeScript compiler fight me on complex generic inference — it's not a dealbreaker but the error messages are genuinely cryptic sometimes. Still wouldn't go back to plain JS for a large codebase though." \
   "Generic inference errors are a TypeScript rite of passage. What are you building on edge?" > /dev/null
-sleep 22
+sleep 1
 
 ingest "${SESSION_BASE}-2" "2025-02-10" \
   "Mostly routing and middleware. We use React for the dashboard and honestly I'm less enthusiastic about React than I used to be — the mental model with hooks is fine but the re-render debugging is a nightmare. Been looking at some of the signals-based frameworks. Also Vercel is pretty flexible about location, I've been considering spending a few months in New York — Lena has family there and the time zone works better for some of our European customers." \
   "Signals are interesting. Are you looking at Solid or Svelte?" > /dev/null
-sleep 22
+sleep 1
 
 echo "Session 2 done."
 
@@ -169,12 +169,12 @@ echo "════════════════════════�
 ingest "${SESSION_BASE}-3" "2025-03-01" \
   "Update — we made the move. Lena and I are in Brooklyn now, Williamsburg specifically. Vercel is fine with it, I'm fully remote. Churro loves the dog parks here, he just turned 4 last week actually, I keep forgetting he's not 3 anymore." \
   "Brooklyn is a great choice. How's the adjustment been?" > /dev/null
-sleep 22
+sleep 1
 
 ingest "${SESSION_BASE}-3" "2025-03-01" \
   "Really good. Oh and I should correct something — I said I was vegan but I've actually been vegetarian for the past year, I occasionally have dairy. Not a huge deal but I don't want to be that person who orders the wrong thing at dinner. Also I've been doing a 10-minute meditation every morning before I open my laptop, helps with the context switching between deep engineering work and meetings." \
   "Vegetarian is easier to navigate at most restaurants anyway. What's your meditation practice?" > /dev/null
-sleep 22
+sleep 1
 
 echo "Session 3 done."
 
@@ -193,12 +193,12 @@ echo "════════════════════════�
 ingest "${SESSION_BASE}-4" "2025-03-20" \
   "Big news — I'm leaving Vercel. Got an offer from Anthropic for a research engineer role on their evals team. It's a different kind of work, more Python than TypeScript ironically, and I've been wrestling with whether the TypeScript strictness I loved is actually slowing me down versus just feeling productive. Python's flexibility is starting to look appealing for research-style iteration." \
   "Anthropic evals is fascinating work. When do you start?" > /dev/null
-sleep 22
+sleep 1
 
 ingest "${SESSION_BASE}-4" "2025-03-20" \
   "Three weeks. I've been doing some prep work in Python and honestly I've missed it — the iteration speed for exploratory work is just different. I still think TypeScript is the right call for large production systems with big teams, but for research and prototyping it's overkill. Also reconsidering React — I looked at some of the newer Next.js patterns and the mental model has actually improved a lot. Less hook spaghetti than I remember." \
   "The TypeScript vs Python divide is very real in research vs production contexts." > /dev/null
-sleep 22
+sleep 1
 
 echo "Session 4 done."
 
@@ -216,12 +216,12 @@ echo "════════════════════════�
 ingest "${SESSION_BASE}-5" "2025-04-15" \
   "One month at Anthropic. The evals work is incredible — I'm writing more Python than I have in years and the research iteration speed is exactly what I wanted. TypeScript feels like the wrong tool for this now, though I'd still use it for a production API. Also Lena and I have some news — she's pregnant, due in October. Which is making us rethink Brooklyn — her parents are in San Francisco and my parents are in Toronto." \
   "Congratulations! That's huge news. The grandparent geography problem is real." > /dev/null
-sleep 22
+sleep 1
 
 ingest "${SESSION_BASE}-5" "2025-04-15" \
   "We're leaning toward going back to San Francisco actually. Anthropic has an office there and I've realized I actually miss having an office to go to a few days a week — remote was great for a while but I miss the serendipitous conversations. Churro would also prefer California weather, I think. He hates the cold." \
   "The pendulum swinging back to office time is pretty common after fully remote." > /dev/null
-sleep 22
+sleep 1
 
 echo "Session 5 done."
 
@@ -241,12 +241,12 @@ echo "════════════════════════�
 ingest "${SESSION_BASE}-6" "2025-05-09" \
   "We're back in San Francisco as of last week. Lena found a remote design role so it was doable. I'm going into the Anthropic office Monday, Wednesday, Friday — hybrid feels right. Churro is thrilled. I went to the climbing gym yesterday for the first time in months, forgot how much I missed it. Also my whole relationship with TypeScript has shifted — I see it now as a production infrastructure tool, not a default. For anything exploratory or research-y, Python. For APIs and systems with teams, TypeScript. That nuance took me a year to arrive at." \
   "That's a mature take on the TypeScript vs Python question. How's the evals work going?" > /dev/null
-sleep 22
+sleep 1
 
 ingest "${SESSION_BASE}-6" "2025-05-09" \
   "Really well. We've been building evaluation harnesses for language models and it's the most intellectually interesting work I've done. React I've fully made peace with — the ecosystem is just too large to ignore and the patterns have genuinely improved. I grab an oat milk flat white from the same place every morning before office days, it's become a ritual. Due date is October 15th, starting to feel real." \
   "Evals work is underrated in terms of impact. Oat milk flat white is the correct San Francisco morning ritual." > /dev/null
-sleep 22
+sleep 1
 
 echo "Session 6 done."
 

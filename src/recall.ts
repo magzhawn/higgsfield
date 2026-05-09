@@ -238,16 +238,21 @@ export async function recall(
   const queryVecs = [primaryVec, ...rewriteVecs]
   timings.embed_ms = performance.now() - tEmbed
 
-  // Step 3a — BM25 scoring across all query variants, keep highest score per memory
+  // Step 3a — BM25 scoring across all query variants, keep highest score per memory.
+  // Also track scores from the ORIGINAL query alone for the precision floor —
+  // rewrite variants are for retrieval recall, not for deciding whether the
+  // user's actual question deserves an answer at all.
   const tBm25 = performance.now()
   let bm25Engine = getCachedBM25(userId)
   if (!bm25Engine) bm25Engine = buildAndCacheBM25(userId, memories)
 
   const bm25Map = new Map<string, number>()
-  for (const q of queries) {
-    const raw = bm25Engine.search(q, memories.length) as Array<[string, number]>
+  let originalMaxBm25 = 0
+  for (let qi = 0; qi < queries.length; qi++) {
+    const raw = bm25Engine.search(queries[qi], memories.length) as Array<[string, number]>
     for (const [id, score] of raw) {
       if ((bm25Map.get(id) ?? 0) < score) bm25Map.set(id, score)
+      if (qi === 0 && score > originalMaxBm25) originalMaxBm25 = score
     }
   }
   const bm25Scored = Array.from(bm25Map.entries())
@@ -255,13 +260,17 @@ export async function recall(
     .sort((a, b) => b.score - a.score)
   timings.bm25_ms = performance.now() - tBm25
 
-  // Step 3b — cosine scoring across all query variants, keep highest score per memory
+  // Step 3b — cosine scoring across all query variants. Same dual tracking:
+  // overall best for retrieval, original-query best for the precision floor.
   const tCosine = performance.now()
   const cosineMap = new Map<string, number>()
-  for (const qVec of queryVecs) {
+  let originalMaxCosine = 0
+  for (let qi = 0; qi < queryVecs.length; qi++) {
+    const qVec = queryVecs[qi]
     for (const m of memories.filter((m) => m.vector)) {
       const s = cosineSimilarity(qVec, unpack(m.vector!))
       if ((cosineMap.get(m.id) ?? 0) < s) cosineMap.set(m.id, s)
+      if (qi === 0 && s > originalMaxCosine) originalMaxCosine = s
     }
   }
   const cosineScored = Array.from(cosineMap.entries())
@@ -276,6 +285,25 @@ export async function recall(
 
   // Step 3c — RRF fusion
   const rrfScores = rrf(bm25Scored, cosineScored)
+
+  // Step 3d — precision floor: short-circuit when nothing matches.
+  // Uses ONLY the original query's BM25 / cosine scores (not rewrite variants).
+  // Rewrite expansion can produce variants that incidentally match identity
+  // facts even on unrelated questions — this gate asks "is this user's actual
+  // question answerable from any memory?" before we trust expanded retrieval.
+  // BM25 prep tasks filter English stop words (see cache.ts), so a non-zero
+  // BM25 score from the original query means real content-word overlap.
+  // Threshold differs by embed mode: stub embeddings produce cosine ~0.17 for
+  // unrelated text and ~0.20-0.40 for related text (see v2-dev notes), so the
+  // stub threshold sits just above the noise floor. Voyage's distribution is
+  // shifted higher (0.26-0.28 unrelated, 0.55+ related) so its threshold is 0.55.
+  const PRECISION_FLOOR_COSINE = Number(
+    process.env.PRECISION_FLOOR_COSINE ?? (process.env.EMBED_STUB ? 0.18 : 0.55)
+  )
+  if (originalMaxBm25 === 0 && originalMaxCosine < PRECISION_FLOOR_COSINE) {
+    timings.total_ms = performance.now() - tStart
+    return { context: "", citations: [], timings }
+  }
 
   // Step 4 — rank all memories by RRF score
   type RankedMemory = MemoryRow & { rrfScore: number }

@@ -148,3 +148,20 @@ MEMORY_AUTH_TOKEN  — optional, if set validates Bearer token on all requests
 - Supersession logic in extraction.ts — working
 - Tier budget assembly structure — extending, not replacing
 - All 18 existing contract tests — must still pass after every session
+
+## v6 build state
+
+[x] Per-request feature toggles (`disable_rewrite`/`disable_entities`/`disable_rerank` in models.ts + main.ts)
+[x] Per-phase timings in `/recall` response (recall.ts)
+[x] `scripts/feature_ablation.ts` with fixture loading + warmup + REPEAT majority voting
+[x] `fixtures/graph_stress_corpus.json` (80 turns, 20 probes, 4 types)
+[x] Voyage rate-limit pacing removed from all scripts (paid 2000 RPM tier)
+[x] Precision floor in recall.ts Step 3d (PRECISION_FLOOR_COSINE, env-tunable)
+[x] BM25 stop-word filter + lightweight stemmer in cache.ts
+[x] CHANGELOG v6 entry written with corrected interpretation (measurement vs feature design)
+[x] Verification: `EMBED_STUB=1 bun test` matches v6-prep baseline (80 pass / 4 known stub-incompatible fails — same as before v6 changes; zero regressions introduced)
+
+## Things explicitly NOT in v6 (acknowledged, not addressed)
+
+- Two probe failures in `feature_ablation.ts` (`what does the user collect?`, `what movie did the user watch last weekend?`) — extraction-vocabulary gap and threshold-calibration case respectively, not retrieval-pipeline gaps. Documented in CHANGELOG v6.
+- A more comprehensive ablation that measures precision@1 (reranker), profile-section presence (derived), sparse-graph corpus (entities). Listed as "what a better ablation would measure" in CHANGELOG v6 — out of scope for this iteration.

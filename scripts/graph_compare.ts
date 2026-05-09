@@ -136,9 +136,8 @@ async function main(): Promise<void> {
     await ingest(FIXTURES[i])
     const elapsed = performance.now() - t0
     console.log(`${elapsed.toFixed(0)}ms — ${FIXTURES[i].slice(0, 60)}`)
-    // Voyage free tier is 3 RPM — pace ingestion to avoid 429s
-    if (!process.env.EMBED_STUB && elapsed < 22000 && i < FIXTURES.length - 1) {
-      await new Promise((r) => setTimeout(r, 22000 - elapsed))
+    if (i < FIXTURES.length - 1) {
+      await new Promise((r) => setTimeout(r, 500))
     }
   }
   console.log(`Total ingest: ${((performance.now() - ingestStart) / 1000).toFixed(1)}s`)

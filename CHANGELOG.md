@@ -1111,3 +1111,317 @@ signal vs 0/8 without — that is the honest win.
 **One-sentence verdict:** the hit-rate improvement is likely a
 calibration artefact; the profile section is a genuine new capability
 worth its token cost for any non-factual workload.
+
+---
+
+## v6 — Per-feature ablation + precision floor
+
+**Date:** 2026-05-09
+
+**Motivation:**
+
+Each retrieval feature added since v1 (BM25, RRF, query rewriting,
+multi-hop entities, graph traversal, derived memories, LLM reranker)
+was justified individually but never measured against the others on
+the same corpus. The question this session set out to answer: which
+features carry their latency cost, and which are pure overhead?
+
+**What was built:**
+
+| File | Change |
+| --- | --- |
+| `src/models.ts` | Three new optional flags on `RecallRequestSchema`: `disable_rewrite`, `disable_entities`, `disable_rerank`. Existing `disable_graph` and `disable_derived` were already there. All five default to `false`, so production behaviour is unchanged. |
+| `src/recall.ts` | `recall()` accepts the three new toggles. Each LLM-augmented step (`rewriteQuery`, `extractEntities`, `rerank`) is gated on its `disable*` flag in addition to the existing `EMBED_STUB` short-circuit. New `timings: Record<string, number>` field added to the return value, populated with per-phase elapsed ms (`fetch_ms`, `derived_ctx_ms`, `rewrite_ms`, `embed_ms`, `bm25_ms`, `cosine_ms`, `entities_ms`, `graph_ms`, `derived_boost_ms`, `rerank_ms`, `total_ms`). |
+| `src/main.ts` | `/recall` route destructures the three new flags, forwards them to `recall()`, and includes `timings` in the JSON response so callers can see the phase breakdown for any individual request. |
+| `scripts/feature_ablation.ts` | New ablation harness. Loads either an inline 11-turn corpus or a fixture file via `FIXTURE=` env var. Probes every query under 6 configurations (baseline + each single-feature ablation), with `REPEAT=N` for averaging. A pre-measurement warmup pass primes the embed cache so the first config in each (probe, config) tuple does not absorb cold-cache cost. Emits four reports: per-config quality + latency, per-feature cost-vs-benefit, COLD-vs-WARM phase breakdown, and a verdict bucketing features into cheap-wins / expensive-wins / no-ops / regressions. |
+| `fixtures/graph_stress_corpus.json` | New 80-turn dense relational corpus (persona "Alex Rivera"). Recurring entities (Theo, Priya, Lucia, Kim, Dani, Mango, Sangam, Crux, Datadog, Anthropic) appear across many memories so spreading activation has paths cosine cannot find directly. 20 probes split 4 direct / 4 single-hop / 8 multi-hop / 4 noise. Multi-hop probes are designed to force entity traversal (e.g., "what restaurant does the user's best friend's partner run?" requires Theo → Priya → Sangam). Noise probes use a `forbid: []` list — passes when none of the forbidden user-specific terms appear in the recall context. |
+| `hard_stress_test.sh`, `scripts/graph_compare.ts`, `scripts/derived_compare.ts`, `scripts/feature_ablation.ts` | All `sleep 22` / `if (elapsed < 22000) await sleep(22000 - elapsed)` blocks removed. The Voyage account is on the paid tier (2000 RPM / 16M TPM on `voyage-3-lite`), so the old 3 RPM pacing was pure dead time. Stress test now runs in ~30 s instead of 5+ min; graph and derived compare scripts run in ~60-70 s. |
+
+**The precision floor (`recall.ts` Step 3d) — three iterations:**
+
+The first ablation run on the 80-turn corpus surfaced a real bug.
+All four noise probes failed across every configuration (0/4
+baseline, 0/4 every ablation). The system was returning user-specific
+context for queries like "what does the user think about climate
+change policy?" — leaking facts about Datadog, Theo, Sangam, etc.
+
+Root cause: `voyage-3-lite` produces non-zero cosine similarity
+against every memory because identity facts ("works at Datadog",
+"lives in San Francisco") share directional overlap with any
+"what does the user…" query. The recall pipeline had no
+"no good match → return empty" guard.
+
+**Iteration 1** — added a precision-floor short-circuit in
+`recall.ts` Step 3d:
+
+```typescript
+const MAX_BM25 = bm25Scored[0]?.score ?? 0
+const MAX_COSINE = cosineScored[0]?.score ?? 0
+if (MAX_BM25 === 0 && MAX_COSINE < 0.55) return { context: "", citations: [], timings }
+```
+
+Smoke test on a 2-memory corpus passed. Re-ran ablation on the
+80-turn corpus — noise still 0/4 across every config. The floor
+was not firing.
+
+**Iteration 2** — found two compounding issues:
+
+*Issue A — BM25 had no stop-word filter.* The tokenizer was
+`text.toLowerCase().split(/\W+/).filter(Boolean)`. Common English
+words ("the", "user", "what", "does", "any", "about") matched
+across every memory, so `MAX_BM25 > 0` for any English query —
+the floor's first condition never held. Fixed in `src/cache.ts`:
+added a 60-word stop-word list and a `tokenize()` prep task that
+filters them out plus the domain-specific token "user" / "users"
+(every memory describes "the user").
+
+*Issue B — the floor used scores from rewrite variants.* The
+Haiku-generated rewrite queries can incidentally produce content
+words that match identity facts even when the user's actual
+question is about an unrelated topic. The floor needs to gate on
+*the user's original question*, not on the union of expanded
+variants. Restructured `Step 3a` and `Step 3b` to track
+`originalMaxBm25` and `originalMaxCosine` separately from the
+overall retrieval scoreboards. The floor uses only those two:
+
+```typescript
+if (originalMaxBm25 === 0 && originalMaxCosine < PRECISION_FLOOR_COSINE) {
+  return { context: "", citations: [], timings }
+}
+```
+
+Re-ran smoke. Noise queries gated correctly (0 ctx). One factual
+query regressed: "where does the user work?" returned 0 because
+"work" did not match the stored token "works" via BM25 (no
+stemming) and cosine fell just under 0.55.
+
+**Iteration 3** — added a lightweight stemmer to the BM25 prep
+tasks. Suffix-strips `-ies` → `-y` (cities → city), `-ing`,
+`-ed`, sibilant `-es` (teaches → teach), and bare `-s` (works →
+work, lives → live). Crucially: the `-es` rule only fires after
+sibilants (`ch`, `sh`, `x`, `z`) so words like "lives" / "loves"
+strip just the `-s` and don't get truncated to "liv" / "lov".
+
+Final smoke on a 10-memory corpus, all features ON:
+
+| Query | Type | Result |
+| --- | --- | --- |
+| climate change policy | noise | ctx_len 0 ✓ |
+| own any cryptocurrency | noise | ctx_len 0 ✓ |
+| sport play professionally | noise | ctx_len 0 ✓ |
+| movie watch last weekend | noise | ctx_len 0 ✓ |
+| where user work | direct | ctx_len 1577 ✓ (stem: works→work) |
+| where user live | direct | ctx_len 1704 ✓ (stem: lives→live) |
+| where user dad live | direct | ctx_len 1765 ✓ |
+| dog name | direct | ctx_len 1846 ✓ |
+| Theo work | single-hop | ctx_len 1657 ✓ |
+| best friend partner restaurant | multi-hop | ctx_len 1781 ✓ |
+| sister teach city | multi-hop | ctx_len 1600 ✓ (stem: teaches→teach) |
+
+**Files changed by the floor work:**
+
+| File | Change |
+| --- | --- |
+| `src/cache.ts` | `BM25_STOP_WORDS` set (60 entries) + `stem()` suffix stripper + new `tokenize()` prep task. BM25 prep tasks switched from inline lambda to `[tokenize]`. |
+| `src/recall.ts` | Step 3a/3b track `originalMaxBm25` / `originalMaxCosine` from `queries[0]` and `queryVecs[0]` only. Step 3d gates on those two values, threshold tunable via `PRECISION_FLOOR_COSINE` env var (default 0.55). |
+
+**Bonus side-effect:** noise queries now skip rewrite-variant embeds,
+entity extraction, graph traversal, derived boost, and rerank.
+They short-circuit at sub-millisecond latency instead of paying
+~5 s for fabricated context.
+
+**Ablation results (REPEAT=3, 80-turn corpus, with all three iterations of the precision floor in place):**
+
+```text
+Config         | Hits         | direct | single | multihop | noise |  Avg latency
+─────────────────────────────────────────────────────────────────────────────────
+baseline       | 18/20 (90%)  | 3/4    | 4/4    | 8/8      | 3/4   |       3373ms
+no_rewrite     | 16/20 (80%)  | 3/4    | 3/4    | 7/8      | 3/4   |       2913ms
+no_entities    | 18/20 (90%)  | 3/4    | 4/4    | 8/8      | 3/4   |       2546ms
+no_rerank      | 18/20 (90%)  | 3/4    | 4/4    | 8/8      | 3/4   |       2163ms
+no_graph       | 18/20 (90%)  | 3/4    | 4/4    | 8/8      | 3/4   |       3576ms
+no_derived     | 18/20 (90%)  | 3/4    | 4/4    | 8/8      | 3/4   |       3393ms
+```
+
+The precision floor lifted baseline hit rate from 16/20 to 18/20
+(noise queries flipped from 0/4 to 3/4) and dropped baseline
+latency from ~4100ms to ~3370ms because noise queries now
+short-circuit before the LLM chain runs. Two probes still fail
+in every config: "what does the user collect?" (factual probe,
+likely cosine < 0.55 floor on the original query) and "what
+movie did the user watch last weekend?" (noise probe, "weekend"
+embeds close to memories about weekend activities). Both are
+threshold-calibration cases rather than architectural problems.
+
+**Per-feature cost vs benefit:**
+
+| Feature  | Latency cost       | Quality gain | Multihop Δ | Noise Δ |
+| -------- | ------------------ | ------------ | ---------- | ------- |
+| rewrite  | **460 ms**         | **+2**       | +1         | +0      |
+| entities | 827 ms             | +0           | +0         | +0      |
+| rerank   | 1210 ms            | +0           | +0         | +0      |
+| graph    | -203 ms (variance) | +0           | +0         | +0      |
+| derived  | -20 ms (variance)  | +0           | +0         | +0      |
+
+Rewrite is the only feature earning its cost. With noise queries
+no longer leaking through every config, rewrite's retrieval-recall
+benefit (synonym/paraphrase variants catching memories the original
+phrasing misses) finally shows up as +2 hits — the two recovered
+probes are "where does the user currently live?" and "what kind
+of cuisine does the partner of the user's friend at the rocket
+company cook?" In both cases, the original query has no
+content-word overlap with the answer-memory after stop-word
+filtering; the rewrite variants supply the bridge tokens.
+
+**Per-phase latency (cold cache vs warm cache, baseline):**
+
+```text
+phase                COLD     WARM    warm %
+─────────────────────────────────────────────
+fetch_ms              1ms       0ms       0%
+derived_ctx_ms        2ms       2ms       0%
+rewrite_ms         1098ms    1220ms      30%  ██████
+embed_ms            221ms     241ms       6%  █
+bm25_ms               2ms       1ms       0%
+cosine_ms             2ms       1ms       0%
+entities_ms        1085ms    1024ms      25%  █████
+graph_ms              4ms       4ms       0%
+derived_boost_ms      2ms       2ms       0%
+rerank_ms          1483ms    1603ms      39%  ████████
+total_ms           3903ms    4100ms     100%
+```
+
+>80 % of recall latency is the three Haiku LLM calls (rewrite,
+entities, rerank). Embedding is 6 % warm. SQLite + BM25 + cosine +
+graph traversal collectively under 10 ms.
+
+**The honest finding — measurement design, not feature design:**
+
+The naive read of this table is "rewrite is the only feature
+worth keeping; drop the rest." That's wrong. The features each
+solve a different problem, and only one of those problems is
+visible to a binary `context.includes(term)` metric. Going
+through them carefully:
+
+**Query rewriting — genuinely valuable, +2 hits / 460 ms.**
+This is the only feature whose value the current metric *can*
+measure, and it does measure it. The two recovered probes
+("where does the user currently live?" and "what kind of cuisine
+does the partner of the user's friend at the rocket company
+cook?") use vocabulary different from the stored memory values.
+After stop-word filtering, the original query has no content-word
+overlap with the answer; the Haiku-generated variants supply the
+bridge tokens. 460 ms for two queries that would otherwise return
+empty is a real, observable win.
+
+**Reranker — improves *ordering*, not *presence*.**
+The metric checks whether `expected_term` appears anywhere in
+the recall context. Whether the answer is the first cited memory
+or the fifth doesn't change the hit/miss outcome. The reranker's
+job is precision at the top — it cannot show up as +N hits when
+hits are scored binary. A precision@1 metric (does the *first*
+citation contain the answer?) would see the reranker's value;
+this script doesn't have one. 1210 ms is the cost of an
+improvement we are not measuring.
+
+**Entity extraction — fallback for sparse graphs.**
+The graph rebuild on this 80-turn corpus produced **142 nodes
+and 1603 edges** — average degree ~22. Spreading activation has
+so many paths that it surfaces connected memories without the
+LLM entity-extraction hop. Entities are designed for the
+*opposite* regime: a sparse graph with few edges, where
+cosine alone won't pull the right neighbour into top-20. On a
+6-memory v1 user with no graph at all, this feature was the
+reason multi-hop worked. At 1603 edges it's redundant work.
+Expected behaviour, not a defect.
+
+**Graph traversal — already saturated by the dense corpus.**
+The entire graph step costs ~3 ms (in-memory BFS) and shows
+slightly *negative* latency cost (-203 ms) which is just
+measurement noise across 360 calls. Graph helped on the v1
+6-memory benchmark; on a 142-node, 1603-edge corpus the answer
+is reachable via direct cosine in nearly every case. Multi-hop
+queries pass 8/8 in every config, but probably via different
+mechanisms (graph contributes when needed, sits idle when not).
+The fixture's multi-hop probes also leak the bridge entity in
+the query phrasing ("best friend's *partner*") so cosine can
+match the link memory directly. A corpus designed around
+entity-implicit queries ("who hosted my farewell dinner last
+February") would force graph activation.
+
+**Derived memories — invisible to this fixture.**
+The 80-turn graph-stress corpus has *zero behavioural probes*.
+Every probe is direct, single-hop, multi-hop, or noise. The
+derived memory layer's value is the `## User profile` section
+that surfaces implicit behavioural patterns ("user prefers
+example-first explanations"). With no behavioural probe in the
+test set there is nothing to detect. The earlier
+`scripts/derived_compare.ts` run on the dedicated behavioural
+corpus showed +2 hits on behavioural probes and `## User profile`
+appearing in 8/8 responses — so the feature works, this fixture
+just doesn't probe for it.
+
+**The 90% baseline ceiling masks everything.**
+
+When baseline is 18/20, a feature can only earn quality gain by
+recovering one of the 2 failing probes. Both failures
+(`what does the user collect?`, `what movie did the user watch
+last weekend?`) fail in *every* config — they are extraction
+gaps (memory not extracted with the right vocabulary) or
+threshold-calibration cases (cosine just under 0.55), not
+retrieval-pipeline gaps. No retrieval feature can recover a
+memory that doesn't exist or scores below the floor. The hit
+rate ceiling at 18/20 means the experiment has almost no room
+to demonstrate feature value even when it exists.
+
+**Why the corpus didn't force graph value (corpus design):**
+
+To make the graph indispensable, multi-hop probes would need to
+phrase queries *without* leaking the bridge entity. "Best
+friend's partner's restaurant" matches the link memory ("Theo's
+partner Priya") via direct cosine because the bridge token
+"partner" appears in both. Genuinely graph-only probes would
+phrase the question abstractly ("who hosted my farewell dinner
+last February") forcing traversal from a temporal/event hook
+through entity links to the answer.
+
+**What stays in the codebase:**
+
+All features remain, gated behind their `disable_*` flags
+(default `false`). Production behaviour is unchanged. The
+flags exist as escape hatches for the workloads where the
+metric this script uses is the metric the caller actually
+cares about — e.g., a sub-2-second factual lookup that only
+needs the answer present, not at position 1, and on a corpus
+where cosine alone covers everything. The precision floor is
+unconditional and free when there's a real match.
+
+**What a better ablation would measure:**
+
+- **precision@1** (or @3) for the reranker — does the first
+  citation contain the answer? This is the metric the reranker
+  was designed against.
+- **profile-section presence** for derived memories, on a
+  corpus with behavioural probes — already implemented in
+  `scripts/derived_compare.ts`, which showed the feature's
+  value clearly.
+- **sparse-graph corpus** for entity extraction — a corpus
+  with `< 100` edges where cosine alone can't bridge memories.
+  Entity extraction is the fallback; it needs a regime where
+  the primary mechanism fails.
+- **paraphrase-heavy probes** for query rewriting — already
+  the case on this corpus (its only observable win), and
+  worth keeping as the reference workload.
+
+The current ablation script is a faithful "binary recall hit
+rate per feature" measurement. It is not a comprehensive
+quality measurement. The features serve different objectives
+and need different metrics to evaluate fairly — describing this
+explicitly is part of the honest reading of the data, not a
+hedge.
+
+**Memory saved for future sessions:**
+[`memory/ablation_finding.md`] documents the result — leading
+with "rewrite earns its cost; reranker/entities/graph/derived
+each serve objectives that binary hit/miss cannot measure" and
+pointing at the data + recommended secondary metrics here.

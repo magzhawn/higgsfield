@@ -183,9 +183,7 @@ async function main() {
     console.log(
       `  [${i + 1}/${CORPUS.length}] ${elapsed.toFixed(0)}ms — ${CORPUS[i].content.slice(0, 55)}…`,
     )
-    if (!process.env.EMBED_STUB && elapsed < 22000) {
-      await sleep(22000 - elapsed)
-    }
+    await sleep(500)
   }
 
   console.log()
