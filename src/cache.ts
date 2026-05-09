@@ -1,6 +1,17 @@
+// @ts-ignore — no types published for wink-bm25-text-search
+import BM25 from "wink-bm25-text-search"
+
+type BM25Engine = ReturnType<typeof BM25>
+
+interface MemoryDoc {
+  id: string
+  value: string
+  key: string
+}
+
 const embedCache = new Map<string, Float32Array>()
 const memoriesCache = new Map<string, any[]>()
-const bm25Cache = new Map<string, any>()
+const bm25Cache = new Map<string, BM25Engine>()
 
 export function getCachedEmbed(text: string): Float32Array | null {
   return embedCache.get(text) ?? null
@@ -19,15 +30,33 @@ export function setCachedMemories(userId: string, memories: any[]): void {
   memoriesCache.set(userId, memories)
 }
 
-export function getCachedBM25(userId: string): any | null {
+export function getCachedBM25(userId: string): BM25Engine | null {
   return bm25Cache.get(userId) ?? null
 }
 
-export function setCachedBM25(userId: string, index: any): void {
+export function setCachedBM25(userId: string, index: BM25Engine): void {
   bm25Cache.set(userId, index)
 }
 
 export function invalidateUser(userId: string): void {
   memoriesCache.delete(userId)
   bm25Cache.delete(userId)
+}
+
+export function buildAndCacheBM25(userId: string, memories: MemoryDoc[]): BM25Engine {
+  const engine = BM25()
+  engine.defineConfig({ fldWeights: { value: 1, key: 2 } })
+  engine.definePrepTasks([
+    (text: string) => text.toLowerCase().split(/\W+/).filter(Boolean),
+  ])
+  for (const mem of memories) {
+    engine.addDoc({ value: mem.value, key: mem.key }, mem.id)
+  }
+  // wink-bm25 requires at least 3 documents to consolidate
+  for (let i = memories.length; i < 3; i++) {
+    engine.addDoc({ value: `__pad__${i}`, key: "__pad__" }, `__pad__${i}`)
+  }
+  engine.consolidate()
+  setCachedBM25(userId, engine)
+  return engine
 }

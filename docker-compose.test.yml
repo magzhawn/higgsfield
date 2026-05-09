@@ -1,0 +1,4 @@
+services:
+  memory:
+    environment:
+      EMBED_STUB: "1"

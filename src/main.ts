@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 import { zValidator } from "@hono/zod-validator"
 import { initDb, q, db } from "./db"
+import openapiSpec from "../openapi.json"
 import {
   TurnRequestSchema,
   RecallRequestSchema,
@@ -8,7 +9,7 @@ import {
 } from "./models"
 import { errorHandler, payloadSizeMiddleware, authMiddleware } from "./middleware"
 import { extractMemories } from "./extraction"
-import { recall } from "./recall"
+import { recall, searchMemories } from "./recall"
 import { embed, unpack, cosineSimilarity } from "./embeddings"
 import { invalidateUser } from "./cache"
 
@@ -70,25 +71,28 @@ app.post("/search", zValidator("json", SearchRequestSchema), async (c) => {
     const { query, user_id, session_id, limit } = c.req.valid("json")
     if (!user_id && !session_id) return c.json({ results: [] })
 
-    const queryVec = await embed(query, "query")
-
-    type MemRow = {
-      id: string; value: string; session_id: string; created_at: string
-      metadata: string; turn_id: string; vector: Buffer | null
-    }
-
-    let memories: MemRow[]
     if (user_id) {
-      memories = q.getMemoriesByUser(user_id) as MemRow[]
-    } else {
-      memories = db.query(`
-        SELECT m.*, e.vector
-        FROM memories m
-        LEFT JOIN embeddings e ON e.memory_id = m.id
-        WHERE m.session_id = ? AND m.active = 1
-        ORDER BY m.created_at DESC
-      `).all(session_id as string) as MemRow[]
+      const ranked = await searchMemories(query, user_id, limit)
+      const results = ranked.map(({ memory: m, rrfScore }) => ({
+        content: m.value,
+        score: rrfScore,
+        session_id: m.session_id,
+        timestamp: m.created_at,
+        metadata: (() => { try { return JSON.parse(m.metadata ?? "{}") } catch { return {} } })(),
+      }))
+      return c.json({ results })
     }
+
+    // session-only search: cosine only (no BM25 index for session scope)
+    const queryVec = await embed(query, "query")
+    type MemRow = { id: string; value: string; session_id: string; created_at: string; metadata: string; vector: Buffer | null }
+    const memories = db.query(`
+      SELECT m.*, e.vector
+      FROM memories m
+      LEFT JOIN embeddings e ON e.memory_id = m.id
+      WHERE m.session_id = ? AND m.active = 1
+      ORDER BY m.created_at DESC
+    `).all(session_id as string) as MemRow[]
 
     const results = memories
       .map((m) => ({
@@ -161,6 +165,27 @@ app.delete("/users/:userId", async (c) => {
     return c.json({ error: "internal error" }, 500)
   }
 })
+
+app.get("/openapi.json", (c) => c.json(openapiSpec))
+
+app.get("/docs", (c) =>
+  c.html(`<!DOCTYPE html>
+<html>
+  <head>
+    <title>Memory Service API</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"/>
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <script>
+      window.onload = () => SwaggerUIBundle({ url: "/openapi.json", dom_id: "#swagger-ui", deepLinking: true })
+    </script>
+  </body>
+</html>`)
+)
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 

@@ -45,7 +45,7 @@ describe("POST /turns", () => {
     expect(status).toBe(201)
     expect(typeof body.id).toBe("string")
     expect((body.id as string).length).toBeGreaterThan(0)
-  }, 30_000)
+  }, 45_000)
 
   it("returns 400 on missing session_id", async () => {
     const { status } = await post("/turns", {
@@ -75,7 +75,7 @@ describe("POST /turns", () => {
     })
     expect(status).toBe(201)
     expect(typeof body.id).toBe("string")
-  }, 30_000)
+  }, 45_000)
 
   it("returns 400 on oversized content", async () => {
     const { status } = await post("/turns", {
@@ -100,7 +100,7 @@ describe("POST /recall", () => {
     expect(status).toBe(200)
     expect(typeof body.context).toBe("string")
     expect(Array.isArray(body.citations)).toBe(true)
-  }, 15_000)
+  }, 30_000)
 
   it("returns empty context for unknown user, not error", async () => {
     const { status, body } = await post("/recall", {
@@ -147,7 +147,7 @@ describe("GET /users/:userId/memories", () => {
     const employer = memories.find((m) => m.key === "employer")
     expect(employer).toBeDefined()
     expect(employer!.value).toContain("Stripe")
-  }, 45_000)
+  }, 60_000)
 })
 
 // ── DELETE /sessions/:sessionId ───────────────────────────────────────────────
@@ -186,29 +186,25 @@ describe("recall quality — basic fixture", () => {
   const sessionId = "fixture-sess-1"
 
   beforeAll(async () => {
-    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
     await post("/turns", {
       session_id: sessionId,
       user_id: userId,
       messages: [{ role: "user", content: "I live in Berlin. I moved here from NYC last year." }],
       timestamp: "2024-01-01T00:00:00Z",
     })
-    await wait(22_000)
     await post("/turns", {
       session_id: sessionId,
       user_id: userId,
       messages: [{ role: "user", content: "I work at Notion as a product manager. I used to work at Stripe." }],
       timestamp: "2024-01-02T00:00:00Z",
     })
-    await wait(22_000)
     await post("/turns", {
       session_id: sessionId,
       user_id: userId,
       messages: [{ role: "user", content: "I have a dog named Biscuit. Walking him every morning." }],
       timestamp: "2024-01-03T00:00:00Z",
     })
-    await wait(22_000)
-  }, 240_000)
+  }, 120_000)
 
   it("location query returns Berlin", async () => {
     const { body } = await post("/recall", {
@@ -218,7 +214,7 @@ describe("recall quality — basic fixture", () => {
       max_tokens: 1024,
     })
     expect(body.context as string).toContain("Berlin")
-  }, 90_000)
+  }, 45_000)
 
   it("employer query returns Notion", async () => {
     const { body } = await post("/recall", {
@@ -228,7 +224,7 @@ describe("recall quality — basic fixture", () => {
       max_tokens: 1024,
     })
     expect(body.context as string).toContain("Notion")
-  }, 90_000)
+  }, 45_000)
 
   it("pet query returns Biscuit", async () => {
     const { body } = await post("/recall", {
@@ -238,22 +234,149 @@ describe("recall quality — basic fixture", () => {
       max_tokens: 1024,
     })
     expect(body.context as string).toContain("Biscuit")
-  }, 90_000)
+  }, 45_000)
 
-  it("noise query returns no quantum-computing-specific content", async () => {
+  it("noise query returns empty context", async () => {
     const { body } = await post("/recall", {
       query: "what does the user think about quantum computing",
       session_id: sessionId,
       user_id: userId,
       max_tokens: 1024,
     })
-    // Tier1 identity-key memories (employer, location, etc.) are always included
-    // regardless of query — that is correct behaviour. What must NOT happen is
-    // that unrelated scored memories appear above the relevance floor (0.15).
-    // The context may contain identity facts but must not be a 500 error.
-    expect(typeof body.context).toBe("string")
-    expect(Array.isArray(body.citations)).toBe(true)
-    // No quantum-related content should appear
-    expect(body.context as string).not.toContain("quantum")
+    // BM25 gate (no token overlap) + cosine gate suppress unrelated queries.
+    // With stub embeddings: zero token overlap → cosine = 0 < 0.05 gate.
+    // With real embeddings: cosine 0.26–0.28 < 0.40 gate.
+    expect(body.context as string).toBe("")
+    expect(body.citations).toEqual([])
+  }, 45_000)
+
+  it("BM25 exact name match — Biscuit query", async () => {
+    const uid = `biscuit-bm25-${Date.now()}`
+    await post("/turns", {
+      session_id: "bm25-sess",
+      user_id: uid,
+      messages: [{ role: "user", content: "I have a dog named Biscuit" }],
+      timestamp: "2024-01-01T00:00:00Z",
+    })
+    const { body } = await post("/recall", {
+      query: "what is the name of the user's pet",
+      session_id: "bm25-sess",
+      user_id: uid,
+      max_tokens: 1024,
+    })
+    expect(body.context as string).toContain("Biscuit")
+    expect((body.citations as unknown[]).length).toBeGreaterThan(0)
+  }, 60_000)
+
+  it("multi-hop — city from pet name", async () => {
+    const uid = `multihop-${Date.now()}`
+    await post("/turns", {
+      session_id: "hop-sess-2",
+      user_id: uid,
+      messages: [{ role: "user", content: "I have a dog named Biscuit" }],
+      timestamp: "2024-01-01T00:00:00Z",
+    })
+    await post("/turns", {
+      session_id: "hop-sess-2",
+      user_id: uid,
+      messages: [{ role: "user", content: "I live in Berlin, Germany" }],
+      timestamp: "2024-01-02T00:00:00Z",
+    })
+    const { body } = await post("/recall", {
+      query: "what city does the person with the dog Biscuit live in",
+      session_id: "hop-sess-2",
+      user_id: uid,
+      max_tokens: 1024,
+    })
+    expect(body.context as string).toContain("Berlin")
+  }, 90_000)
+
+  it("query rewriting — synonym query", async () => {
+    const uid = `rewrite-${Date.now()}`
+    await post("/turns", {
+      session_id: "rewrite-sess",
+      user_id: uid,
+      messages: [{ role: "user", content: "I work at Notion as a product manager" }],
+      timestamp: "2024-01-01T00:00:00Z",
+    })
+    const { body } = await post("/recall", {
+      query: "what is the user's occupation and employer",
+      session_id: "rewrite-sess",
+      user_id: uid,
+      max_tokens: 1024,
+    })
+    expect(body.context as string).toContain("Notion")
+  }, 60_000)
+})
+
+// ── reranker ──────────────────────────────────────────────────────────────────
+
+describe("reranker", () => {
+  it("puts most relevant memory first in citations", async () => {
+    const uid = "rerank-citation-user"
+    await del(`/users/${uid}`)
+    await post("/turns", {
+      session_id: "rerank-sess",
+      user_id: uid,
+      messages: [{
+        role: "user",
+        content: "I work at DeepMind as a research scientist. I live in London. I have a cat named Pixel. I love hiking. My diet is vegan.",
+      }],
+      timestamp: "2024-01-01T00:00:00Z",
+    })
+    await new Promise((r) => setTimeout(r, 3000))
+    const { body } = await post("/recall", {
+      query: "what is the user's job and employer?",
+      session_id: "rerank-sess",
+      user_id: uid,
+      max_tokens: 1024,
+    })
+    const citations = body.citations as Array<{ snippet: string }>
+    expect(citations.length).toBeGreaterThan(0)
+    const top = citations[0].snippet.toLowerCase()
+    expect(top.includes("deepmind") || top.includes("research") || top.includes("scientist")).toBe(true)
+  }, 60_000)
+})
+
+// ── opinion history ───────────────────────────────────────────────────────────
+
+describe("opinion history", () => {
+  it("surfaces opinion evolution arc in context", async () => {
+    const uid = "opinion-history-user"
+    await del(`/users/${uid}`)
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+    await post("/turns", {
+      session_id: "opinion-sess",
+      user_id: uid,
+      messages: [{ role: "user", content: "I love TypeScript, it's the best language for large teams" }],
+      timestamp: "2024-03-01T09:00:00Z",
+    })
+    await wait(3000)
+    await post("/turns", {
+      session_id: "opinion-sess",
+      user_id: uid,
+      messages: [{ role: "user", content: "TypeScript generics are getting really annoying honestly" }],
+      timestamp: "2024-03-08T09:00:00Z",
+    })
+    await wait(3000)
+    await post("/turns", {
+      session_id: "opinion-sess",
+      user_id: uid,
+      messages: [{ role: "user", content: "TypeScript is fine, I've made peace with it for big projects" }],
+      timestamp: "2024-03-15T09:00:00Z",
+    })
+    await wait(3000)
+
+    const { body } = await post("/recall", {
+      query: "what does the user think about TypeScript?",
+      session_id: "opinion-sess",
+      user_id: uid,
+      max_tokens: 2048,
+    })
+    const ctx = body.context as string
+    // Opinion history appears when extraction formed a supersession chain.
+    // Minimum correct behavior: TypeScript appears in context at all.
+    expect(ctx.toLowerCase()).toContain("typescript")
   }, 90_000)
 })

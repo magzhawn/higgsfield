@@ -134,12 +134,12 @@ MEMORY_AUTH_TOKEN  — optional, if set validates Bearer token on all requests
 ## v2 build state
 
 [x] Session 1 — v1 completed
-[ ] Session 2-1 — Noise fix + latency logging
-[ ] Session 2-2 — BM25 + RRF
+[x] Session 2-1 — Noise fix + latency logging
+[x] Session 2-2 — BM25 + RRF
 [ ] Session 2-3 — Batch embedding fallback
 [ ] Session 2-4 — Query rewriting
-[ ] Session 2-5 — Multi-hop retrieval
-[ ] Session 2-6 — Tests + fixture updates + CHANGELOG
+[x] Session 2-5 — Multi-hop retrieval
+[x] Session 2-6 — Tests + fixture updates + CHANGELOG
 
 ## What NOT to touch in v2
 

@@ -92,6 +92,13 @@ export const q = {
       ORDER BY m.created_at DESC
     `).all({ $userId: userId }),
 
+  getAllMemoriesByUser: (userId: string) =>
+    db.query(`
+      SELECT * FROM memories
+      WHERE user_id = $userId
+      ORDER BY created_at ASC
+    `).all({ $userId: userId }),
+
   getMemoryByKey: (userId: string, key: string) =>
     db.query(`
       SELECT m.*, e.vector
