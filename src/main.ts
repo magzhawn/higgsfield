@@ -8,7 +8,7 @@ import {
   SearchRequestSchema,
 } from "./models"
 import { errorHandler, payloadSizeMiddleware, authMiddleware } from "./middleware"
-import { extractMemories } from "./extraction"
+import { extractMemories, consolidateSession } from "./extraction"
 import { recall, searchMemories } from "./recall"
 import { embed, unpack, cosineSimilarity } from "./embeddings"
 import { invalidateUser } from "./cache"
@@ -193,11 +193,47 @@ app.get("/users/:userId/memories", async (c) => {
 app.delete("/sessions/:sessionId", async (c) => {
   try {
     const { sessionId } = c.req.param()
+
+    // Capture user_id before delete wipes the turns table — needed so the
+    // fire-and-forget consolidation can still attribute new memories to the
+    // user. The setTimeout(0) defers consolidation until after the 204
+    // response is queued; deleteSession runs synchronously below, wiping the
+    // session's per-turn memories. Consolidation then writes its newly
+    // recovered memories with the orphaned session_id but tied to userId,
+    // so the user keeps consolidated insights past session end.
+    const userRow = db
+      .query("SELECT user_id FROM turns WHERE session_id = $sid LIMIT 1")
+      .get({ $sid: sessionId }) as { user_id: string | null } | null
+    const userId = userRow?.user_id ?? null
+
     q.deleteSession(sessionId)
+
+    if (userId) {
+      setTimeout(() => {
+        consolidateSession(sessionId, userId).catch((err) =>
+          console.error("[extract] consolidation error:", err?.message ?? err),
+        )
+      }, 0)
+    }
+
     return c.body(null, 204)
   } catch (err) {
     console.error(err)
     return c.json({ error: "internal error" }, 500)
+  }
+})
+
+app.post("/sessions/:sessionId/consolidate", async (c) => {
+  const sessionId = c.req.param("sessionId")
+  try {
+    const row = db
+      .query("SELECT user_id FROM turns WHERE session_id = $sid LIMIT 1")
+      .get({ $sid: sessionId }) as { user_id: string | null } | null
+    if (!row?.user_id) return c.json({ error: "session not found" }, 404)
+    await consolidateSession(sessionId, row.user_id)
+    return c.json({ consolidated: true, sessionId })
+  } catch (err: any) {
+    return c.json({ error: err?.message ?? "internal error" }, 500)
   }
 })
 

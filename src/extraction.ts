@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk"
-import { q, tx } from "./db"
+import { db, q, tx } from "./db"
 import { batchEmbedAndStore } from "./embeddings"
 import type { Message } from "./models"
 
@@ -471,5 +471,186 @@ export async function extractMemories(
   } catch (err) {
     console.error("extractMemories failed:", err)
     return []
+  }
+}
+
+// Single-memory write that mirrors the per-memory branch inside extractMemories:
+// singleton → supersede previous active value; accumulating → dedup by value
+// similarity, insert alongside; event → always insert. Returns the inserted id
+// or null when the dedup branch skipped the write. Used by consolidateSession
+// to reuse the same supersession + class semantics without forcing extractMemories
+// to be refactored around a shared helper.
+function writeSingleMemory(
+  memory: ExtractedMemory,
+  userId: string,
+  sessionId: string,
+  turnId: string,
+): string | null {
+  const memClass = getMemoryClass(memory.key)
+  const memoryId = crypto.randomUUID()
+
+  const doInsert = (supersedesId: string | null) => {
+    q.insertMemory.run({
+      $id: memoryId,
+      $user_id: userId,
+      $session_id: sessionId,
+      $turn_id: turnId,
+      $type: memory.type,
+      $key: memory.key,
+      $value: memory.value,
+      $confidence: memory.confidence ?? 1.0,
+      $implicit: memory.implicit ? 1 : 0,
+      $supersedes: supersedesId,
+      $memory_class: memClass,
+    })
+  }
+
+  if (memClass === "singleton") {
+    const existing = q.getMemoryByKey(userId, memory.key) as { id: string } | null
+    tx(() => {
+      if (existing) q.supersedeMemory(existing.id)
+      doInsert(existing?.id ?? null)
+    })
+  } else if (memClass === "accumulating") {
+    const sameKey = q.getActiveMemoriesByKey(userId, memory.key) as MemoryRow[]
+    const isDuplicate = sameKey.some(
+      (m) => valueSimilarity(m.value, memory.value) > 0.75,
+    )
+    if (isDuplicate) {
+      console.log(
+        `[extract] consolidation dedup: skipped "${memory.value.slice(0, 40)}"`,
+      )
+      return null
+    }
+    tx(() => doInsert(null))
+  } else {
+    tx(() => doInsert(null))
+  }
+
+  return memoryId
+}
+
+const CONSOLIDATION_PROMPT = `You are reviewing a complete conversation session
+to extract memories that were likely missed during per-turn extraction.
+
+You have access to the FULL session — all turns at once. Use this to:
+1. Resolve pronouns and references across turns
+   ("she" in turn 4 refers to "Lena" introduced in turn 1)
+2. Detect single-mention facts that appeared briefly
+   ("oat milk flat white" → coffee preference)
+3. Identify implicit patterns across multiple turns
+   ("skip the theory", "just show me code", "quick answer only"
+    → user prefers direct, practical communication)
+4. Correct extraction errors from earlier in the session
+
+IMPORTANT:
+- Only extract facts NOT already in the existing memories list
+- Do not re-extract things already stored
+- Focus on what was MISSED, not what was already captured
+- Use low confidence (0.5-0.7) for uncertain inferences
+- Use high confidence (0.8-0.95) for clear explicit facts
+
+Existing memories already stored (do not re-extract these):
+{EXISTING_MEMORIES}
+
+Full session transcript:
+{TRANSCRIPT}
+
+Return ONLY valid JSON (no markdown):
+{
+  "new_memories": [
+    {
+      "type": "fact|preference|opinion|event|habit",
+      "key": "snake_case_key",
+      "value": "descriptive phrase in third person",
+      "confidence": 0.0-1.0,
+      "implicit": true
+    }
+  ]
+}
+
+Return {"new_memories": []} if nothing new was missed.`
+
+// Cross-turn consolidation pass. Per-turn extraction sees a 3-turn window and
+// silently drops single-mention implicit facts ("Lena" + "she works at Figma"
+// across separate turns; a one-line "oat milk flat white"). This pass sees
+// the full session at once and recovers them. Best-effort — never crashes
+// /turns or DELETE handlers; logs and returns on any failure.
+export async function consolidateSession(
+  sessionId: string,
+  userId: string,
+): Promise<void> {
+  if (process.env.EMBED_STUB) return
+  if (!userId) return
+
+  try {
+    const turns = db.query(`
+      SELECT messages, timestamp FROM turns
+      WHERE session_id = $sid
+      ORDER BY created_at ASC
+    `).all({ $sid: sessionId }) as Array<{ messages: string; timestamp: string }>
+
+    if (turns.length < 2) {
+      console.log(`[extract] consolidation skipped — only ${turns.length} turn(s)`)
+      return
+    }
+
+    const transcript = turns
+      .map((t, i) => {
+        const msgs = JSON.parse(t.messages) as Array<{ role: string; content: string }>
+        const text = msgs.map((m) => `${m.role}: ${m.content}`).join("\n")
+        return `[Turn ${i + 1} — ${t.timestamp?.slice(0, 10)}]\n${text}`
+      })
+      .join("\n\n")
+
+    const existing = db.query(`
+      SELECT key, value FROM memories
+      WHERE user_id = $uid AND session_id = $sid AND active = 1
+    `).all({ $uid: userId, $sid: sessionId }) as Array<{ key: string; value: string }>
+
+    const existingList =
+      existing.length > 0
+        ? existing.map((m) => `${m.key}: ${m.value}`).join("\n")
+        : "(none yet)"
+
+    const prompt = CONSOLIDATION_PROMPT
+      .replace("{EXISTING_MEMORIES}", existingList)
+      .replace("{TRANSCRIPT}", transcript)
+
+    const resp = await getClient().messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 800,
+      messages: [{ role: "user", content: prompt }],
+    })
+
+    const block = resp.content.find((b) => b.type === "text")
+    if (!block || block.type !== "text") return
+    const text = block.text.replace(/```json|```/g, "").trim()
+    const parsed = JSON.parse(text) as { new_memories: ExtractedMemory[] }
+    const newMems = parsed.new_memories ?? []
+
+    if (newMems.length === 0) {
+      console.log(`[extract] consolidation: no new memories found`)
+      return
+    }
+
+    console.log(
+      `[extract] consolidation: found ${newMems.length} missed memories ` +
+        `— ${newMems.map((m) => m.key).join(", ")}`,
+    )
+
+    // Insert each via the shared single-memory helper so supersession +
+    // memory_class semantics match the per-turn pipeline. Embed in one batch
+    // to keep Voyage calls minimal under rate-limit pressure.
+    const consolidationTurnId = `consolidation-${crypto.randomUUID()}`
+    const embedItems: Array<{ memoryId: string; value: string }> = []
+    for (const mem of newMems) {
+      const id = writeSingleMemory(mem, userId, sessionId, consolidationTurnId)
+      if (id) embedItems.push({ memoryId: id, value: mem.value })
+    }
+
+    if (embedItems.length > 0) await batchEmbedAndStore(embedItems, userId)
+  } catch (err: any) {
+    console.error("[extract] consolidation failed:", err?.message ?? err)
   }
 }
