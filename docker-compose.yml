@@ -6,13 +6,31 @@ services:
       - "8080:8080"
     volumes:
       - memory_data:/app/data
-    env_file:
-      - .env
+    # No `env_file:` directive — docker compose auto-loads ./.env for
+    # ${VAR} substitution in the environment block below. This makes
+    # `docker compose up -d` work on a clean clone with no .env file
+    # (the substitutions fall back to empty defaults), while still
+    # passing keys through when .env exists or host shell has them set.
+    # Backwards-compatible across all docker compose v2 versions.
     environment:
-      # Lean default — turn rewriting is off (~1s saved per /turns).
-      # Subject-rule prompt covers the same failure modes more cheaply.
-      # Set to empty string in .env to enable.
-      DISABLE_TURN_REWRITE: "1"
+      # API keys — substituted from host shell env or auto-loaded .env.
+      # Empty defaults let the service start without keys (degrades
+      # gracefully per README "Failure modes": no extraction, no
+      # embeddings, /recall returns empty context).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+      MEMORY_AUTH_TOKEN: ${MEMORY_AUTH_TOKEN:-}
+      # Always-/app/data — the named volume mount lives there.
+      DB_PATH: ${DB_PATH:-/app/data/memory.db}
+      # Test / opt-in feature flags (all empty by default).
+      EMBED_STUB: ${EMBED_STUB:-}
+      ENABLE_DERIVED: ${ENABLE_DERIVED:-}
+      PRECISION_FLOOR_COSINE: ${PRECISION_FLOOR_COSINE:-}
+      # Lean default: pre-extraction turn rewriting off (~1s saved per
+      # /turns). Subject-rule prompt covers the same failure modes more
+      # cheaply. Override with `DISABLE_TURN_REWRITE=` (empty) on host
+      # shell to re-enable.
+      DISABLE_TURN_REWRITE: ${DISABLE_TURN_REWRITE:-1}
     restart: unless-stopped
 
 volumes:

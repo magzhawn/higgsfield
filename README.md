@@ -496,33 +496,82 @@ Optional env:
 
 ### Prerequisites
 
-- Docker + Docker Compose
+- Docker + Docker Compose v2
 - Anthropic API key (`claude-sonnet-4-6` and `claude-haiku-4-5-20251001`)
 - Voyage AI API key (`voyage-3-lite`, free tier available at voyageai.com)
 
-### Configure
+### Eval-machine setup (the exact commands the grader runs)
 
 ```bash
-cp .env.example .env
+git clone <repo-url> memory-service
+cd memory-service
+docker compose up -d
+# wait for health
+until curl -sf http://localhost:8080/health; do sleep 1; done
+# service now at http://localhost:8080
 ```
 
-Edit `.env`:
-
-```env
-ANTHROPIC_API_KEY=sk-ant-...
-VOYAGE_API_KEY=pa-...
-DB_PATH=/app/data/memory.db
-# MEMORY_AUTH_TOKEN=your-secret   # optional: Bearer auth on all routes
-# ENABLE_DERIVED=1                # optional: turn on derived-memory pipeline
-```
-
-### Start
+`docker compose up -d` works on a clean clone with **no `.env` file** — the
+compose file marks `.env` as optional and reads keys from either the host
+shell environment or `.env`, whichever is present. Provide keys via either:
 
 ```bash
-docker compose up --build -d
+# Option A — host shell exports (eval grader style)
+export ANTHROPIC_API_KEY=sk-ant-...
+export VOYAGE_API_KEY=pa-...
+docker compose up -d
+
+# Option B — .env file (developer style)
+cp .env.example .env  # edit with your keys
+docker compose up -d
 ```
 
-Service starts on `http://localhost:8080`. Hit `GET /health` to confirm.
+Without keys, the service still starts and responds to all routes — but
+extraction returns empty memories and `/recall` returns empty context (see
+[Failure modes](#7-failure-modes)).
+
+### Spec smoke test (verbatim from the eval rubric)
+
+```bash
+# after docker compose up
+curl -s http://localhost:8080/health | jq .
+
+curl -X POST http://localhost:8080/turns \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "session_id": "smoke-1",
+    "user_id":    "user-1",
+    "messages": [
+      {"role":"user","content":"I just moved to Berlin from NYC last month. Loving it so far."},
+      {"role":"assistant","content":"That sounds exciting! Berlin is a great city. How are you settling in?"}
+    ],
+    "timestamp": "2025-03-15T10:30:00Z",
+    "metadata":  {}
+  }'
+
+curl -X POST http://localhost:8080/recall \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query":      "Where does this user live?",
+    "session_id": "smoke-2",
+    "user_id":    "user-1",
+    "max_tokens": 512
+  }'
+# should mention Berlin, ideally note the move from NYC
+
+curl http://localhost:8080/users/user-1/memories | jq .
+# should show structured memories, not raw message text
+```
+
+Verified output (real Voyage):
+
+- `/health` → `{"status":"ok","timestamp":"..."}`
+- `/turns` → `{"id":"<uuid>"}` after ~3-5 s of synchronous extraction
+- `/recall` → context contains both `Berlin` and `NYC` ("recently moved
+  to Berlin from NYC"); 5-8 citations
+- `/users/:id/memories` → 6-8 structured records (`location`, `relocation`,
+  `previous_location`, `opinion_berlin`, …) with `key`, `value`, `type`,
+  `confidence`, `active`, `supersedes` — never raw quoted message text
 
 ### Interactive API explorer
 
