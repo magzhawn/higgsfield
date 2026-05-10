@@ -8,6 +8,62 @@ const CANONICAL_KEYS =
   "family_member, education, hobby, opinion_typescript, opinion_python, " +
   "opinion_react, preference_communication, preference_format, health_condition"
 
+// Memory-class taxonomy. Each fact falls into one of three behavioral classes:
+//   singleton    — one active value at a time (employer, location, diet)
+//                  → supersede previous before insert (existing behavior)
+//   accumulating — multiple values coexist (hobbies, skills, pets)
+//                  → insert alongside existing, dedup by value similarity
+//   event        — timestamped occurrences (job_change, promotion, marriage)
+//                  → always insert, never supersede
+//
+// Without this branch, `hobby` (and any other accumulating key) silently
+// loses entries: each new "hobby" extraction supersedes the previous one,
+// so a user who hikes AND climbs ends up with only the most recent hobby.
+const ACCUMULATING_KEYS = new Set([
+  // hobbies
+  "hobby", "hobby_hiking", "hobby_climbing", "hobby_running",
+  "hobby_cooking", "hobby_reading", "hobby_gaming", "hobby_music",
+  "hobby_photography", "hobby_painting", "hobby_cycling",
+  // skills
+  "skill", "skill_typescript", "skill_python", "skill_rust",
+  "skill_go", "skill_java", "skill_design",
+  // languages
+  "language",
+  // pets (multiple pets can coexist)
+  "pet_name", "pet_type", "pet_breed",
+  // social
+  "friend", "friend_name", "interest", "project", "side_project",
+])
+
+const EVENT_KEYS = new Set([
+  "job_change", "relocation", "milestone", "life_event",
+  "promotion", "graduation", "marriage", "birth",
+  "travel", "purchase", "award",
+])
+
+function getMemoryClass(key: string): "singleton" | "accumulating" | "event" {
+  const lower = key.toLowerCase()
+  if (EVENT_KEYS.has(lower)) return "event"
+  if (ACCUMULATING_KEYS.has(lower)) return "accumulating"
+  // Prefix match: hobby_anything → accumulating
+  for (const ak of ACCUMULATING_KEYS) {
+    if (lower.startsWith(ak + "_")) return "accumulating"
+  }
+  return "singleton"
+}
+
+// Word-overlap similarity for value-level deduplication on accumulating
+// memories. Same logic as derived.ts textSimilarity — copied rather than
+// imported to keep extraction.ts free of cross-module dependencies on a
+// derivation-layer helper.
+function valueSimilarity(a: string, b: string): number {
+  const wa = new Set(a.toLowerCase().split(/\W+/).filter((w) => w.length > 3))
+  const wb = new Set(b.toLowerCase().split(/\W+/).filter((w) => w.length > 3))
+  if (wa.size === 0 || wb.size === 0) return 0
+  const intersection = [...wa].filter((w) => wb.has(w)).length
+  return intersection / Math.max(wa.size, wb.size)
+}
+
 const EXPLICIT_PROMPT = `Extract facts explicitly stated by the user in this conversation.
 Use canonical keys where they fit: {CANONICAL_KEYS}
 For anything else invent a snake_case key.
@@ -353,14 +409,10 @@ export async function extractMemories(
     const embedItems: Array<{ memoryId: string; value: string }> = []
 
     for (const memory of merged) {
-      const existing = q.getMemoryByKey(userId, memory.key) as
-        | { id: string }
-        | null
-
+      const memClass = getMemoryClass(memory.key)
       const memoryId = crypto.randomUUID()
 
-      tx(() => {
-        if (existing) q.supersedeMemory(existing.id)
+      const doInsert = (supersedesId: string | null) => {
         q.insertMemory.run({
           $id: memoryId,
           $user_id: userId,
@@ -371,9 +423,44 @@ export async function extractMemories(
           $value: memory.value,
           $confidence: memory.confidence ?? 1.0,
           $implicit: memory.implicit ? 1 : 0,
-          $supersedes: existing?.id ?? null,
+          $supersedes: supersedesId,
+          $memory_class: memClass,
         })
-      })
+      }
+
+      if (memClass === "singleton") {
+        // Existing behavior — supersede previous active value before insert.
+        const existing = q.getMemoryByKey(userId, memory.key) as
+          | { id: string }
+          | null
+        tx(() => {
+          if (existing) q.supersedeMemory(existing.id)
+          doInsert(existing?.id ?? null)
+        })
+      } else if (memClass === "accumulating") {
+        // Multiple values coexist for this key. Insert alongside existing
+        // entries unless one is sufficiently similar (>0.75 word overlap).
+        const sameKey = q.getActiveMemoriesByKey(userId, memory.key) as
+          MemoryRow[]
+        const isDuplicate = sameKey.some(
+          (m) => valueSimilarity(m.value, memory.value) > 0.75,
+        )
+        if (isDuplicate) {
+          console.log(
+            `[extract] accumulating dedup: skipped "${memory.value.slice(0, 40)}"`,
+          )
+          continue // skip this memory entirely — don't insert, don't embed
+        }
+        tx(() => doInsert(null))
+        console.log(
+          `[extract] accumulating insert: ${memory.key} = ` +
+            `"${memory.value.slice(0, 50)}"`,
+        )
+      } else {
+        // event — always insert, never supersede.
+        tx(() => doInsert(null))
+        console.log(`[extract] event insert: ${memory.key}`)
+      }
 
       insertedIds.push(memoryId)
       embedItems.push({ memoryId, value: memory.value })

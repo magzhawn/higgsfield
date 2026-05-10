@@ -31,19 +31,20 @@ export function initDb(): void {
 
   db.run(`
     CREATE TABLE IF NOT EXISTS memories (
-      id          TEXT PRIMARY KEY,
-      user_id     TEXT NOT NULL,
-      session_id  TEXT NOT NULL,
-      turn_id     TEXT NOT NULL,
-      type        TEXT NOT NULL,
-      key         TEXT NOT NULL,
-      value       TEXT NOT NULL,
-      confidence  REAL DEFAULT 1.0,
-      implicit    INTEGER DEFAULT 0,
-      active      INTEGER DEFAULT 1,
-      supersedes  TEXT,
-      created_at  TEXT DEFAULT (datetime('now')),
-      updated_at  TEXT DEFAULT (datetime('now'))
+      id            TEXT PRIMARY KEY,
+      user_id       TEXT NOT NULL,
+      session_id    TEXT NOT NULL,
+      turn_id       TEXT NOT NULL,
+      type          TEXT NOT NULL,
+      key           TEXT NOT NULL,
+      value         TEXT NOT NULL,
+      confidence    REAL DEFAULT 1.0,
+      implicit      INTEGER DEFAULT 0,
+      active        INTEGER DEFAULT 1,
+      supersedes    TEXT,
+      memory_class  TEXT NOT NULL DEFAULT 'singleton',
+      created_at    TEXT DEFAULT (datetime('now')),
+      updated_at    TEXT DEFAULT (datetime('now'))
     )
   `)
 
@@ -55,9 +56,10 @@ export function initDb(): void {
     )
   `)
 
-  db.run("CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id, active)")
-  db.run("CREATE INDEX IF NOT EXISTS idx_memories_key  ON memories(user_id, key, active)")
-  db.run("CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id)")
+  db.run("CREATE INDEX IF NOT EXISTS idx_memories_user  ON memories(user_id, active)")
+  db.run("CREATE INDEX IF NOT EXISTS idx_memories_key   ON memories(user_id, key, active)")
+  db.run("CREATE INDEX IF NOT EXISTS idx_memories_class ON memories(user_id, memory_class, active)")
+  db.run("CREATE INDEX IF NOT EXISTS idx_turns_session  ON turns(session_id)")
 
   db.run(`
     CREATE TABLE IF NOT EXISTS memory_associations (
@@ -105,8 +107,8 @@ export const q = {
   `),
 
   insertMemory: db.query(`
-    INSERT INTO memories (id, user_id, session_id, turn_id, type, key, value, confidence, implicit, supersedes)
-    VALUES ($id, $user_id, $session_id, $turn_id, $type, $key, $value, $confidence, $implicit, $supersedes)
+    INSERT INTO memories (id, user_id, session_id, turn_id, type, key, value, confidence, implicit, supersedes, memory_class)
+    VALUES ($id, $user_id, $session_id, $turn_id, $type, $key, $value, $confidence, $implicit, $supersedes, $memory_class)
   `),
 
   insertEmbedding: db.query(`
@@ -138,6 +140,15 @@ export const q = {
       WHERE m.user_id = $userId AND m.key = $key AND m.active = 1
       LIMIT 1
     `).get({ $userId: userId, $key: key }),
+
+  // Returns ALL active memories for (user_id, key) — used by the accumulating
+  // memory-class branch in extraction.ts to check for value-similarity dedup
+  // before inserting alongside existing entries with the same key.
+  getActiveMemoriesByKey: (userId: string, key: string) =>
+    db.query(`
+      SELECT * FROM memories
+      WHERE user_id = $userId AND key = $key AND active = 1
+    `).all({ $userId: userId, $key: key }),
 
   supersedeMemory: (id: string) =>
     db.query(`
