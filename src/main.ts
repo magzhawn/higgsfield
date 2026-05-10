@@ -48,11 +48,17 @@ app.post("/turns", zValidator("json", TurnRequestSchema), async (c) => {
     console.log(`[turns] extraction done in ${(performance.now() - t0).toFixed(0)}ms`)
     console.log(`[turns] total ${(performance.now() - t0).toFixed(0)}ms`)
 
-    // Fire-and-forget derivation — never awaited, never blocks the 201.
-    // setTimeout(0) hands off after the response is queued. Derived state
-    // is read directly from derived_memories at recall time, so no cache
-    // invalidation is needed when this completes.
-    if (body.user_id && !process.env.EMBED_STUB) {
+    // Fire-and-forget derivation — gated on ENABLE_DERIVED=1 per the lean
+    // default architecture. Background pipeline is ~3s of Haiku work that
+    // produces the `## User profile` section; only worthwhile for
+    // non-factual workloads (coaching, therapy, long-running assistants).
+    // Set ENABLE_DERIVED=1 in the environment to turn this on; otherwise
+    // skip and the recall side will read an empty derived_memories table.
+    if (
+      body.user_id &&
+      !process.env.EMBED_STUB &&
+      process.env.ENABLE_DERIVED === "1"
+    ) {
       const userId = body.user_id
       setTimeout(() => {
         deriveMemories(userId, memoryIds).catch((err) =>

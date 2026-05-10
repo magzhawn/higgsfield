@@ -287,6 +287,9 @@ describe("recall quality — basic fixture", () => {
       session_id: "hop-sess-2",
       user_id: uid,
       max_tokens: 1024,
+      // Graph + entities are off in the lean default; this is a multi-hop test, opt in.
+      disable_graph: false,
+      disable_entities: false,
     })
     expect(body.context as string).toContain("Berlin")
   }, 90_000)
@@ -330,6 +333,7 @@ describe("reranker", () => {
       session_id: "rerank-sess",
       user_id: uid,
       max_tokens: 1024,
+      disable_rerank: false,  // rerank is off by default in lean architecture; opt back in for this test
     })
     const citations = body.citations as Array<{ snippet: string }>
     expect(citations.length).toBeGreaterThan(0)

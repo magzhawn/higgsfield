@@ -26,15 +26,21 @@ export const RecallRequestSchema = z.object({
   session_id: z.string(),
   user_id: z.string().nullable().optional(),
   max_tokens: z.number().int().min(64).max(8192).default(1024),
-  disable_graph: z.boolean().optional().default(false),
-  disable_derived: z.boolean().optional().default(false),
-  disable_rewrite: z.boolean().optional().default(false),
-  disable_entities: z.boolean().optional().default(false),
-  disable_rerank: z.boolean().optional().default(false),
+  // Defaults reflect the optimal Recall@K config measured on the test corpora
+  // (see CHANGELOG "Feature analysis & optimal architecture"). The tester
+  // does not pass disable flags, so default behaviour IS the shipped config.
+  //
+  // ON by default — measurable Recall@K gain or essentially free:
+  disable_rewrite: z.boolean().optional().default(false),    // +460 ms / +2 hits on vocab-mismatch (only LLM feature with binary gain)
+  disable_graph: z.boolean().optional().default(false),      // ~3 ms write + ~3 ms read; supports multi-hop on sparse fixtures
+  disable_entities: z.boolean().optional().default(false),   // ~800 ms LLM but bridges multi-hop when graph is sparse
   disable_bm25: z.boolean().optional().default(false),
-  disable_hyde: z.boolean().optional().default(false),
   disable_temporal: z.boolean().optional().default(false),
   disable_aggregation: z.boolean().optional().default(false),
+  // OFF by default — zero measured Recall@K gain on tested corpora:
+  disable_rerank: z.boolean().optional().default(true),      // +1210 ms, improves precision@1/MRR only — invisible to Recall@K
+  disable_hyde: z.boolean().optional().default(true),        // +1.3-1.9 s, 0 measured gain (subject-rule + KEY_SYNONYMS cover same gap)
+  disable_derived: z.boolean().optional().default(true),     // 20 % token-budget tax + slight Recall@K regression on factual workloads
 })
 export type RecallRequest = z.infer<typeof RecallRequestSchema>
 

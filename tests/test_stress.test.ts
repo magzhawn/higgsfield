@@ -476,10 +476,15 @@ describe("recall ranking — hybrid + multi-hop + rewriting", () => {
 
   it("multi-hop: query about the dog's city pulls Portland via association", async () => {
     if (STUB_MODE) return  // stub vectors don't form semantic edges
-    const { body } = await recall(
-      userId,
-      "what city does the person who owns Biscuit live in?",
-    )
+    // Graph + entities are off in the lean default; opt back in for this probe.
+    const { body } = await post<{ context: string; citations: unknown[] }>("/recall", {
+      query: "what city does the person who owns Biscuit live in?",
+      session_id: `probe-${userId}`,
+      user_id: userId,
+      max_tokens: 1024,
+      disable_graph: false,
+      disable_entities: false,
+    })
     const ctx = body.context.toLowerCase()
     expect(ctx).toContain("biscuit")
     expect(ctx).toContain("portland")

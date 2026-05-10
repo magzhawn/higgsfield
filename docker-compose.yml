@@ -8,6 +8,11 @@ services:
       - memory_data:/app/data
     env_file:
       - .env
+    environment:
+      # Lean default — turn rewriting is off (~1s saved per /turns).
+      # Subject-rule prompt covers the same failure modes more cheaply.
+      # Set to empty string in .env to enable.
+      DISABLE_TURN_REWRITE: "1"
     restart: unless-stopped
 
 volumes:

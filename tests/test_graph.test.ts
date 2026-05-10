@@ -27,6 +27,10 @@ async function recall(query: string) {
       session_id: "graph-probe",
       user_id: USER,
       max_tokens: 1024,
+      // Graph + entities are off by default in the lean architecture; this
+      // test file specifically verifies the graph feature, so opt back in.
+      disable_graph: false,
+      disable_entities: false,
     }),
   })
   return r.json()
