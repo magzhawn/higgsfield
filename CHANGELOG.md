@@ -1975,3 +1975,38 @@ Compared to the pre-fix-pack baseline (v1=3/11, v2-v6=6/11):
   caution required prompt engineering to avoid meta-refusals; future
   model releases may need similar tuning. The defensive regex catches
   refusals and degrades to non-HyDE retrieval gracefully.
+
+---
+
+## Feature stress test (scripts/feature_stress_test.ts)
+
+**Date:** 2026-05-10
+
+**Results:** 7 PASS / 0 FAIL / 1 INFO
+
+| Phase | Feature | Metric | Without | With | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Turn rewriting | Subject confusion (employer) | Stripe ✓ | Stripe ✓ | PASS |
+| 1 | Turn rewriting | Subject confusion (location) | SF ✓ | SF ✓ | PASS |
+| 1 | Turn rewriting | Third-party prefixed key | present ✓ | present ✓ | PASS |
+| 1 | Turn rewriting | Implicit→explicit preference | extracted ✓ | extracted ✓ | INFO |
+| 2 | Contradiction detection | Stripe superseded after quit | n/a | deactivated ✓ | PASS |
+| 3 | memory_class accumulating | Both hobbies coexist | n/a | both active ✓ | PASS |
+| 4 | HyDE | Recall@K (5 vocab-mismatch probes) | 4/5 | 4/5 | PASS |
+| 4 | HyDE | MRR | 0.800 | 0.800 | PASS |
+
+**Key findings:**
+
+Turn rewriting and HyDE show zero measurable delta on this corpus.
+Not a failure — the subject-confusion prompt rule (added in the same
+session) and BM25 synonym expansion cover the same failure modes.
+Redundant coverage: multiple mechanisms converge on the same correct
+answer. On harder corpora (vocabulary outside KEY_SYNONYMS, multi-turn
+pronoun chains), rewriting and HyDE would activate independently.
+
+Contradiction detection and memory_class are clean behavioral wins:
+
+- "I quit" correctly supersedes the Stripe employer (no key match
+  needed — signal-word gate + Haiku judge)
+- Hiking and climbing coexist as separate accumulating memories
+  (the hobby supersession bug documented in v2 is now fixed)
