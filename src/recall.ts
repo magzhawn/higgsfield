@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk"
 import { spreadActivation } from "./graph"
-import { q } from "./db"
+import { db, q } from "./db"
 import { embed, unpack, cosineSimilarity } from "./embeddings"
 import { getCachedMemories, setCachedMemories, getCachedBM25, buildAndCacheBM25 } from "./cache"
 import { getDerivedContext, getDerivedBoosts } from "./derived"
@@ -35,6 +35,24 @@ const HALF_LIVES_DAYS: Partial<Record<string, number>> = {
   opinion:     30,         // opinions shift faster
   event:       14,         // "preparing for interview" goes stale quickly
   habit:       60,         // habits persist but can drop
+}
+
+// Temporal query signals — phrases that indicate the user is asking about the
+// past, not the current state. When detected, recall expands the candidate
+// pool to include inactive (superseded) memories so historical facts can
+// surface. Without this, queries like "what did I used to think about X" would
+// return nothing because superseded memories are normally invisible to retrieval.
+const TEMPORAL_SIGNALS = [
+  "used to", "before", "previously", "what did", "what was",
+  "when they", "at the time", "back then", "historically",
+  "formerly", "in the past", "old opinion", "earlier",
+  "changed", "switched", "evolved", "thought before",
+  "original", "initial", "first thought", "prior",
+]
+
+function isTemporalQuery(query: string): boolean {
+  const lower = query.toLowerCase()
+  return TEMPORAL_SIGNALS.some((s) => lower.includes(s))
 }
 
 export interface MemoryRow {
@@ -260,17 +278,60 @@ export async function recall(
   disableRerank = false,
   disableBm25 = false,
   disableHyde = false,
+  disableTemporal = false,
 ): Promise<{ context: string; citations: Citation[]; timings: Record<string, number> }> {
   const timings: Record<string, number> = {}
   const tStart = performance.now()
-  // Step 1 — fetch memories (use cache)
+  // Step 1 — fetch memories (use cache).
+  // activeMemories is the canonical cached set (active=1 only). `memories`
+  // starts as a reference to it, then expands for temporal queries below.
+  // Keep them separate so the BM25 cache (built from activeMemories) never
+  // gets polluted with inactive entries — non-temporal queries on the same
+  // user must not see superseded memories leak through cached BM25 hits.
   const tFetch = performance.now()
-  let memories = getCachedMemories(userId) as MemoryRow[] | null
-  if (!memories) {
-    memories = q.getMemoriesByUser(userId) as MemoryRow[]
-    setCachedMemories(userId, memories)
+  let activeMemories = getCachedMemories(userId) as MemoryRow[] | null
+  if (!activeMemories) {
+    activeMemories = q.getMemoriesByUser(userId) as MemoryRow[]
+    setCachedMemories(userId, activeMemories)
   }
+  let memories = activeMemories
   timings.fetch_ms = performance.now() - tFetch
+
+  // Step 1b — temporal expansion. When the query contains a "what did I used
+  // to" / "before" / "previously" signal, fetch superseded memories and add
+  // them to the candidate pool with a 0.7× confidence penalty so active
+  // memories still outrank them on equal RRF scores. Inactive memories rely
+  // on cosine for retrieval (BM25 cache stays active-only — see comment above).
+  const temporal = isTemporalQuery(query)
+  if (temporal && !disableTemporal && !process.env.EMBED_STUB) {
+    const allMemories = db.query(`
+      SELECT m.*, e.vector
+      FROM memories m
+      LEFT JOIN embeddings e ON e.memory_id = m.id
+      WHERE m.user_id = $uid
+      ORDER BY m.created_at DESC
+    `).all({ $uid: userId }) as Array<MemoryRow & { active: number }>
+
+    const activeIds = new Set(activeMemories.map((m) => m.id))
+    const inactive = allMemories.filter(
+      (m) => m.active === 0 && !activeIds.has(m.id),
+    )
+
+    if (inactive.length > 0) {
+      console.log(
+        `[recall] temporal query detected — including ${inactive.length} ` +
+          `inactive memories in candidate pool`,
+      )
+      memories = [
+        ...activeMemories,
+        ...inactive.map((m) => ({
+          ...m,
+          confidence: (m.confidence ?? 1.0) * 0.7,
+        })),
+      ]
+    }
+  }
+
   if (memories.length === 0) return { context: "", citations: [], timings }
 
   // Reserve up to 20% of the token budget for the derived "User profile"
@@ -352,7 +413,10 @@ export async function recall(
   let bm25Scored: Array<{ id: string; score: number }> = []
   if (!disableBm25) {
     let bm25Engine = getCachedBM25(userId)
-    if (!bm25Engine) bm25Engine = buildAndCacheBM25(userId, memories)
+    // Build BM25 from activeMemories only — never from the temporal-expanded
+    // pool — so the cached index stays clean for subsequent non-temporal
+    // queries. Inactive memories surface via cosine, not BM25.
+    if (!bm25Engine) bm25Engine = buildAndCacheBM25(userId, activeMemories)
     for (let qi = 0; qi < queries.length; qi++) {
       const raw = bm25Engine.search(queries[qi], memories.length) as Array<[string, number]>
       for (const [id, score] of raw) {

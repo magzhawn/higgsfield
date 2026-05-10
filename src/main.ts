@@ -74,13 +74,13 @@ app.post("/recall", zValidator("json", RecallRequestSchema), async (c) => {
     const {
       query, user_id, max_tokens,
       disable_graph, disable_derived,
-      disable_rewrite, disable_entities, disable_rerank, disable_bm25, disable_hyde,
+      disable_rewrite, disable_entities, disable_rerank, disable_bm25, disable_hyde, disable_temporal,
     } = c.req.valid("json")
     if (!user_id) return c.json({ context: "", citations: [] })
     const { context, citations, timings } = await recall(
       query, user_id, max_tokens,
       disable_graph, disable_derived,
-      disable_rewrite, disable_entities, disable_rerank, disable_bm25, disable_hyde,
+      disable_rewrite, disable_entities, disable_rerank, disable_bm25, disable_hyde, disable_temporal,
     )
     console.log(`[recall] ${(performance.now() - t0).toFixed(0)}ms`)
     return c.json({ context, citations, timings })
