@@ -478,7 +478,13 @@ export async function recall(
     disableRerank || process.env.EMBED_STUB ? ranked : await rerank(query, ranked)
   timings.rerank_ms = performance.now() - tRerank
 
-  // Step 5 — tier split using RRF score + BM25 gate for tier 1
+  // Step 5 — tier split using RRF score + BM25 gate for tier 1.
+  // effectiveGate per memory: facts (extraction confidence ~1.0) get a
+  // slightly more permissive cosine threshold; opinions/events keep the
+  // baseline COSINE_GATE because they're noisier signals.
+  const effectiveGate = (memory: RankedMemory): number =>
+    memory.type === "fact" ? COSINE_GATE - 0.05 : COSINE_GATE
+
   const tier1: RankedMemory[] = []
   const tier2: RankedMemory[] = []
 
@@ -486,10 +492,11 @@ export async function recall(
     const hasBm25Overlap = (bm25ScoreMap.get(m.id) ?? 0) > BM25_GATE
     const cosineScore = cosineScoreMap.get(m.id) ?? 0
     const isIdentity = IDENTITY_KEYS.has(m.key)
+    const gate = effectiveGate(m)
 
-    if (isIdentity && (hasBm25Overlap || cosineScore > COSINE_GATE)) {
+    if (isIdentity && (hasBm25Overlap || cosineScore > gate)) {
       tier1.push(m)
-    } else if (!isIdentity && (hasBm25Overlap || cosineScore > COSINE_GATE)) {
+    } else if (!isIdentity && (hasBm25Overlap || cosineScore > gate)) {
       tier2.push(m)
     }
     // below both thresholds → dropped entirely

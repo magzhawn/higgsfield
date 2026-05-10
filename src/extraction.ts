@@ -11,6 +11,31 @@ const CANONICAL_KEYS =
 const EXPLICIT_PROMPT = `Extract facts explicitly stated by the user in this conversation.
 Use canonical keys where they fit: {CANONICAL_KEYS}
 For anything else invent a snake_case key.
+
+CRITICAL — SUBJECT RULE: Only extract facts about THE USER
+(the person speaking in the "user" role messages).
+
+If the user mentions facts about another person — a friend,
+colleague, family member, or anyone else — store those facts
+under a relationship-prefixed key, NEVER under identity keys.
+
+Examples of CORRECT extraction:
+  User: "My friend Marco runs a studio called Tidepool"
+  → {key: "friend_marco_employer", value: "Marco runs Tidepool game studio", type: "fact"}
+  NOT → {key: "employer", value: "runs Tidepool game studio"}
+
+  User: "My partner Lena works at Figma as a UX designer"
+  → {key: "partner_employer", value: "Lena works at Figma as UX designer", type: "fact"}
+  NOT → {key: "employer", value: "works at Figma"}
+
+  User: "My sister teaches at UNAM in Mexico City"
+  → {key: "sister_employer", value: "sister teaches at UNAM", type: "fact"}
+  NOT → {key: "location", value: "based in Mexico City"}
+
+Identity keys (employer, location, role, diet, pet_name, etc.)
+MUST refer to the user only. Third-party facts use prefixed keys:
+friend_[name]_*, partner_*, sister_*, colleague_*, etc.
+
 Return ONLY valid JSON, no markdown:
 {"memories":[{"type":"fact|preference|opinion|event","key":"...","value":"descriptive phrase not raw quote","confidence":0.0-1.0,"implicit":false}]}
 Rules:
@@ -23,6 +48,31 @@ Conversation:
 const IMPLICIT_PROMPT = `Find facts IMPLIED but not directly stated in this conversation.
 Also find corrections ("I meant X not Y", "actually...", "wait...").
 Already found explicit facts (do not repeat these): {ALREADY_FOUND}
+
+CRITICAL — SUBJECT RULE: Only extract facts about THE USER
+(the person speaking in the "user" role messages).
+
+If the user mentions facts about another person — a friend,
+colleague, family member, or anyone else — store those facts
+under a relationship-prefixed key, NEVER under identity keys.
+
+Examples of CORRECT extraction:
+  User: "My friend Marco runs a studio called Tidepool"
+  → {key: "friend_marco_employer", value: "Marco runs Tidepool game studio", type: "fact"}
+  NOT → {key: "employer", value: "runs Tidepool game studio"}
+
+  User: "My partner Lena works at Figma as a UX designer"
+  → {key: "partner_employer", value: "Lena works at Figma as UX designer", type: "fact"}
+  NOT → {key: "employer", value: "works at Figma"}
+
+  User: "My sister teaches at UNAM in Mexico City"
+  → {key: "sister_employer", value: "sister teaches at UNAM", type: "fact"}
+  NOT → {key: "location", value: "based in Mexico City"}
+
+Identity keys (employer, location, role, diet, pet_name, etc.)
+MUST refer to the user only. Third-party facts use prefixed keys:
+friend_[name]_*, partner_*, sister_*, colleague_*, etc.
+
 Return ONLY valid JSON, no markdown:
 {"memories":[{"type":"fact|preference|opinion|event","key":"...","value":"descriptive phrase","confidence":0.0-1.0,"implicit":true,"correction_of":null_or_quoted_text}]}
 Rules:
@@ -66,7 +116,12 @@ async function runPass(
 
 function parseMemories(raw: string): ExtractedMemory[] {
   try {
-    const parsed = JSON.parse(raw)
+    // Strip markdown code fences. The longer subject-rule prompt sometimes
+    // makes Sonnet wrap output in ```json ... ``` despite the "no markdown"
+    // instruction. Other LLM helpers in this codebase (rewriteQuery,
+    // extractEntities, rerank) do the same defensive strip.
+    const cleaned = raw.replace(/^```(?:json)?\s*|\s*```$/g, "").trim()
+    const parsed = JSON.parse(cleaned)
     if (!Array.isArray(parsed?.memories)) return []
     return parsed.memories.filter(
       (m: unknown) =>

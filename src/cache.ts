@@ -103,12 +103,27 @@ const tokenize = (text: string): string[] =>
     .filter((t) => t.length > 0 && !BM25_STOP_WORDS.has(t))
     .map(stem)
 
+// Per-key synonym injection — appended to each memory's value at index time
+// so a query containing "live" matches the location memory even when the
+// stored value uses different vocabulary (e.g. "based in San Diego").
+// Bridges the BM25 gap between question-form queries and statement-form values.
+const KEY_SYNONYMS: Record<string, string[]> = {
+  location:   ["live", "lives", "home", "city", "reside", "where", "based"],
+  employer:   ["work", "works", "job", "company", "employed", "employer"],
+  diet:       ["eat", "eats", "food", "vegetarian", "vegan", "dietary", "diet"],
+  pet_name:   ["dog", "cat", "pet", "animal", "named"],
+  role:       ["role", "title", "position", "occupation", "job"],
+  preference: ["prefer", "like", "enjoy", "favorite", "favourite"],
+}
+
 export function buildAndCacheBM25(userId: string, memories: MemoryDoc[]): BM25Engine {
   const engine = BM25()
   engine.defineConfig({ fldWeights: { value: 1, key: 2 } })
   engine.definePrepTasks([tokenize])
   for (const mem of memories) {
-    engine.addDoc({ value: mem.value, key: mem.key }, mem.id)
+    const syns = KEY_SYNONYMS[mem.key] ?? []
+    const enrichedValue = syns.length > 0 ? `${mem.value} ${syns.join(" ")}` : mem.value
+    engine.addDoc({ value: enrichedValue, key: mem.key }, mem.id)
   }
   // wink-bm25 requires at least 3 documents to consolidate
   for (let i = memories.length; i < 3; i++) {
