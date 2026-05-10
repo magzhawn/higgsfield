@@ -95,6 +95,58 @@ function getClient(): Anthropic {
   return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 }
 
+const REWRITE_PROMPT = `You are a narrative normalizer for a memory system.
+
+Rewrite the following conversation turn into a clear, third-person
+factual narrative about the participants.
+
+Rules:
+1. SUBJECT CLARITY: Every sentence must have an explicit subject.
+   - Facts about the USER (the speaker): "The user [fact]."
+   - Facts about OTHERS: "The user's friend Marco [fact]." or
+     "The user's partner Lena [fact]." Never use pronouns alone.
+2. MAKE IMPLICIT EXPLICIT: Convert behavioral signals to explicit statements.
+   - "skip the theory, show me code" → "The user prefers to learn through
+     working code examples rather than theoretical explanations."
+   - "quick answer only" → "The user prefers concise, direct answers."
+3. PRESERVE ALL FACTS: Do not add or remove factual content.
+4. THIRD PERSON: Write entirely in third person. Never use "I" or "my".
+5. COMPLETE SENTENCES: Each fact gets its own sentence.
+
+Original turn:
+{MESSAGES}
+
+Return only the rewritten narrative. No preamble, no explanation.`
+
+// Pre-extraction normalizer. Runs before the two-pass Sonnet+Haiku extraction
+// so subject-confusion and implicit-content gaps are resolved at the input
+// layer rather than relying on prompt rules in every downstream extraction call.
+// Skipped when EMBED_STUB=1 (deterministic tests) or DISABLE_TURN_REWRITE=1
+// (lets us A/B the feature). The original messages are still persisted to the
+// turns table — only the extraction input is rewritten.
+async function rewriteTurn(messages: Message[]): Promise<string> {
+  const rawText = formatTurn(messages)
+  if (process.env.EMBED_STUB || process.env.DISABLE_TURN_REWRITE) return rawText
+  try {
+    const formatted = messages
+      .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+      .join("\n")
+    const resp = await getClient().messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 600,
+      messages: [{ role: "user", content: REWRITE_PROMPT.replace("{MESSAGES}", formatted) }],
+    })
+    const block = resp.content.find((b) => b.type === "text")
+    const rewritten = block && block.type === "text" ? block.text.trim() : ""
+    if (!rewritten) return rawText
+    console.log(`[extract] rewrite: ${rewritten.slice(0, 100)}…`)
+    return rewritten
+  } catch (err: any) {
+    console.error("[extract] rewrite failed, using raw:", err?.message ?? err)
+    return rawText
+  }
+}
+
 async function runPass(
   prompt: string,
   model: string
@@ -146,17 +198,20 @@ export async function extractMemories(
   messages: Message[]
 ): Promise<string[]> {
   try {
-    const turnText = formatTurn(messages)
+    // Step 0 — narrative normalization. Convert raw conversational text to
+    // canonical third-person narrative before extraction so subject-confusion
+    // and implicit-content gaps are resolved at the input layer.
+    const narrativeText = await rewriteTurn(messages)
 
     const explicitPrompt = EXPLICIT_PROMPT
       .replace("{CANONICAL_KEYS}", CANONICAL_KEYS)
-      .replace("{TURN_TEXT}", turnText)
+      .replace("{TURN_TEXT}", narrativeText)
 
     // Both prompts fire simultaneously. ALREADY_FOUND is empty for the parallel
     // implicit pass; key-level supersession in the write loop handles any overlap.
     const implicitPrompt = IMPLICIT_PROMPT
       .replace("{ALREADY_FOUND}", "[]")
-      .replace("{TURN_TEXT}", turnText)
+      .replace("{TURN_TEXT}", narrativeText)
 
     const [explicit, implicit] = await Promise.all([
       runPass(explicitPrompt, "claude-sonnet-4-6"),

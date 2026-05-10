@@ -82,6 +82,41 @@ async function haiku(prompt: string, maxTokens = 200) {
   })
 }
 
+// HyDE (Gao et al. 2022) — generate a hypothetical answer-document and embed
+// it in DOCUMENT space (not query space) so it scores cleanly against stored
+// memory vectors. Bridges the query↔document embedding gap that "where does
+// the user live?" vs "lives in San Diego" suffers from.
+async function generateHypothetical(query: string): Promise<string | null> {
+  try {
+    const resp = await haiku(
+      `You are generating a HYPOTHETICAL example sentence for a vector-search retrieval system. ` +
+      `You are NOT answering the query truthfully — you are FABRICATING a plausible-sounding ` +
+      `sentence that, if it existed in a memory database, would be the perfect match for this query. ` +
+      `The fabricated content is never shown to anyone; it is only embedded and used as a search vector.\n\n` +
+      `Query: "${query}"\n\n` +
+      `Rules:\n` +
+      `- Start with "The user" and state a plausible fact directly.\n` +
+      `- Never refuse, never say "I don't know" — invent a specific, concrete-sounding fact.\n` +
+      `- Pick any plausible value (any city, any job, any food, etc.) — accuracy does not matter.\n\n` +
+      `Examples:\n` +
+      `  Query: "where does the user live?" → "The user lives in San Diego, California."\n` +
+      `  Query: "what does the user eat?" → "The user follows a vegetarian diet."\n` +
+      `  Query: "where does the user work?" → "The user works at Qualcomm as a chip architect."\n` +
+      `  Query: "what is the user's hobby?" → "The user enjoys rock climbing on weekends."\n\n` +
+      `Return only the fabricated sentence, nothing else. No preamble, no caveats.`,
+      100,
+    )
+    const block = resp.content[0]
+    if (block.type !== "text") return null
+    const text = block.text.trim()
+    // Defensive: if Haiku still refused with a meta-response, treat as null.
+    if (/^(i (don'?t|do not|cannot|can'?t)|sorry|unfortunately)/i.test(text)) return null
+    return text
+  } catch {
+    return null
+  }
+}
+
 async function rewriteQuery(query: string): Promise<string[]> {
   try {
     const resp = await haiku(`
@@ -224,6 +259,7 @@ export async function recall(
   disableEntities = false,
   disableRerank = false,
   disableBm25 = false,
+  disableHyde = false,
 ): Promise<{ context: string; citations: Citation[]; timings: Record<string, number> }> {
   const timings: Record<string, number> = {}
   const tStart = performance.now()
@@ -255,9 +291,14 @@ export async function recall(
 
   // Best-effort embed: 5s timeout prevents 429 retry waits from blocking recall.
   // Under rate pressure, rewrite variants and entity hops are skipped gracefully.
-  const embedBestEffort = (text: string): Promise<Float32Array | null> =>
+  // Type defaults to "query" (rewrite variants, entity hops) — HyDE passes
+  // "document" because its hypothetical answer lives in document space.
+  const embedBestEffort = (
+    text: string,
+    type: "query" | "document" = "query",
+  ): Promise<Float32Array | null> =>
     Promise.race([
-      embed(text, "query").catch(() => null),
+      embed(text, type).catch(() => null),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
     ])
 
@@ -273,10 +314,30 @@ export async function recall(
   const tEmbed = performance.now()
   const primaryVec = await embed(queries[0], "query")
   const rewriteVecs = (
-    await Promise.all(queries.slice(1).map(embedBestEffort))
+    await Promise.all(queries.slice(1).map((q) => embedBestEffort(q)))
   ).filter(Boolean) as Float32Array[]
   const queryVecs = [primaryVec, ...rewriteVecs]
   timings.embed_ms = performance.now() - tEmbed
+
+  // Step 2b — HyDE: generate a hypothetical document that would answer the
+  // query, embed it in DOCUMENT space (not query space), and add it to the
+  // cosine query pool. The hypothetical sits in the same embedding region as
+  // stored memory vectors, so cosine scores cleanly even when the user's
+  // question vocabulary differs from the stored memory vocabulary.
+  // Skipped in stub mode (no Haiku call) and when explicitly disabled.
+  const tHyde = performance.now()
+  if (!disableHyde && !process.env.EMBED_STUB) {
+    const hypothetical = await generateHypothetical(query)
+    if (hypothetical) {
+      console.log(`[recall] HyDE: "${hypothetical.slice(0, 80)}"`)
+      const hydeVec = await embedBestEffort(hypothetical, "document")
+      if (hydeVec) {
+        queries.push(hypothetical)
+        queryVecs.push(hydeVec)
+      }
+    }
+  }
+  timings.hyde_ms = performance.now() - tHyde
 
   // Step 3a — BM25 scoring across all query variants, keep highest score per memory.
   // Also track scores from the ORIGINAL query alone for the precision floor —
