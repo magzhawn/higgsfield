@@ -1732,3 +1732,47 @@ body's timestamp field.
   clock. That's a small extraction.ts change, deferred because the
   current behavior is also defensible (a memory extracted yesterday
   was *believed* yesterday).
+
+---
+
+## Version metrics (11-turn corpus, real Voyage AI)
+
+Measured using scripts/version_metrics.ts. Each version simulated
+by toggling disable_* flags on POST /recall against the same ingested
+corpus. disable_bm25 flag added to recall.ts specifically to enable
+a genuine v1 simulation.
+
+| Version | Recall@K | MRR | Direct | Multihop | Behavioral |
+| --- | --- | --- | --- | --- | --- |
+| v1 — cosine-only, no BM25 | 3/11 (27%) | 0.273 | 2/4 | 0/4 | 1/3 |
+| v2 — BM25 + RRF + noise gate | 6/11 (55%) | 0.500 | 2/4 | 2/4 | 2/3 |
+| v3 — + query rewrite + reranker | 6/11 (55%) | 0.500 | 2/4 | 2/4 | 2/3 |
+| v4 — + spreading activation graph | 6/11 (55%) | 0.500 | 2/4 | 2/4 | 2/3 |
+| v5 — + derived memories | 6/11 (55%) | 0.500 | 2/4 | 2/4 | 2/3 |
+| v6 — + confidence weighting + decay | 6/11 (55%) | 0.500 | 2/4 | 2/4 | 2/3 |
+
+**v1 → v2 is the largest single improvement:** BM25 token matching
+doubled Recall@K (27% → 55%) and MRR (0.273 → 0.500). Multihop
+jumped from 0/4 to 2/4 — exact token matches on "coronado", "beach",
+"convoy" that cosine alone couldn't reach.
+
+**v2 → v6 plateau has two causes:**
+
+1. Five probes fail in extraction, not retrieval. When "Marco runs
+   an indie game studio called Tidepool in La Jolla" is processed,
+   the LLM extracts Marco's employer and location under the user's
+   identity keys — a subject-confusion bug. This means `location`,
+   `employer`, and the Marco multihop probe are corrupted at source.
+   No retrieval feature can recover a fact stored under the wrong
+   subject. The remaining 5/11 ceiling is an extraction ceiling,
+   not a retrieval ceiling.
+
+2. Binary hit/miss cannot see precision improvements. The reranker
+   (v3), graph (v4), derived memories (v5), and confidence decay (v6)
+   all improve citation ordering and behavioral enrichment — but
+   Recall@K only asks "does the term appear anywhere in context?"
+   The right metrics for these features are precision@1 (is the top
+   citation correct?) and profile-section presence (does derived
+   memory appear?). The 80-turn corpus ablation showed graph improving
+   multi-hop from 80% to 90% where the corpus was dense enough to
+   form meaningful edges.
