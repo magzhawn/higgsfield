@@ -1,0 +1,31 @@
+{
+  "description": "Small factual corpus — 12 turns of direct identity facts. Baseline test for BM25 + cosine + RRF without multi-hop or temporal complexity.",
+  "persona": "Sara Chen, software engineer with stable identity facts.",
+  "user_id_template": "fixture-small-{run}",
+  "turns": [
+    { "ts": "2025-02-01T09:00:00Z", "session": "s1", "content": "Hi! I'm Sara Chen. I just turned 29 this month." },
+    { "ts": "2025-02-01T09:30:00Z", "session": "s1", "content": "I live in Seattle, Washington. Moved here three years ago for the job." },
+    { "ts": "2025-02-02T10:00:00Z", "session": "s2", "content": "I'm a senior software engineer at Microsoft. Working on the Azure team." },
+    { "ts": "2025-02-03T10:00:00Z", "session": "s3", "content": "I have a Shiba Inu named Yuki. She's three years old and loves snow." },
+    { "ts": "2025-02-04T10:00:00Z", "session": "s4", "content": "I'm vegan — have been for about five years now." },
+    { "ts": "2025-02-05T10:00:00Z", "session": "s5", "content": "My main hobby is bouldering. I climb at Seattle Bouldering Project two or three times a week." },
+    { "ts": "2025-02-06T10:00:00Z", "session": "s6", "content": "My partner is Theo. We've been together six years and live together." },
+    { "ts": "2025-02-07T10:00:00Z", "session": "s7", "content": "I love TypeScript. It's the language I reach for first on every new project." },
+    { "ts": "2025-02-08T10:00:00Z", "session": "s8", "content": "I'm learning Korean — Theo's family is Korean and I want to talk to his parents in their language." },
+    { "ts": "2025-02-09T10:00:00Z", "session": "s9", "content": "I prefer remote work. The Microsoft office in Bellevue is fine, but I'm 80% remote." },
+    { "ts": "2025-02-10T10:00:00Z", "session": "s10", "content": "I drink black coffee — no sugar, no milk. Three cups a day usually." },
+    { "ts": "2025-02-11T10:00:00Z", "session": "s11", "content": "On Sundays I bake sourdough. Started during the pandemic and never stopped." }
+  ],
+  "probes": [
+    { "query": "where does the user live?",                               "expect": ["seattle"],           "type": "direct" },
+    { "query": "where does the user work?",                                "expect": ["microsoft"],         "type": "direct" },
+    { "query": "what is the user's role?",                                 "expect": ["software engineer", "engineer"], "type": "direct" },
+    { "query": "what is the user's pet?",                                  "expect": ["yuki", "shiba"],     "type": "direct" },
+    { "query": "what does the user eat?",                                  "expect": ["vegan"],             "type": "direct" },
+    { "query": "what is the user's hobby?",                                "expect": ["bouldering", "climb"], "type": "direct" },
+    { "query": "who is the user's partner?",                               "expect": ["theo"],              "type": "direct" },
+    { "query": "what programming language does the user love?",            "expect": ["typescript"],        "type": "direct" },
+    { "query": "what language is the user learning?",                      "expect": ["korean"],            "type": "direct" },
+    { "query": "what does the user think about cryptocurrency?",           "expect": [],                    "forbid": ["seattle", "microsoft", "yuki", "vegan", "theo", "typescript", "korean"], "type": "noise" }
+  ]
+}

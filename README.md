@@ -450,6 +450,46 @@ running every probe:
 | `tests/test_graph.test.ts`    | Spreading-activation graph behaviour (requires real Voyage)          |
 | `tests/test_fixture.test.ts`  | Loads `fixtures/conversations.json`, runs probes, reports quality metric |
 
+### Master architecture analysis (`bun run analyze`)
+
+```bash
+docker compose up --build -d
+bun run analyze
+# or to a file:
+bun run analyze > analysis_report.md
+```
+
+`scripts/master_analysis.ts` loads every fixture in `fixtures/`, ingests
+each into a unique user, then probes each query under three configs:
+
+- **minimal** — BM25 + cosine + RRF only (everything else off)
+- **default** — shipped config (rewrite + graph + entities ON)
+- **all_on** — every retrieval feature enabled
+
+It reports per-fixture × per-config hit rates by probe type
+(direct / multihop / temporal / aggregation / behavioral / noise),
+latency p50/p95, cross-config deltas, and a verdict on whether the
+data supports the shipped default. Real Voyage required;
+~15-25 min wall time on the paid tier.
+
+Optional env:
+
+- `FIXTURES=small_factual,medium_temporal` — comma-separated stems to load
+- `BASE=http://localhost:8080` — service URL
+- `KEEP_DATA=1` — don't delete user data after the run
+- `SKIP_INGEST=1` — reuse previously-ingested users (pair with `KEEP_DATA=1`
+  on the prior run)
+
+### Fixture inventory
+
+| Fixture                              | Turns | Probes | Probe types                                                                  |
+| ------------------------------------ | ----- | ------ | ---------------------------------------------------------------------------- |
+| `fixtures/small_factual.json`        | 12    | 10     | direct (9), noise (1) — baseline test for BM25+cosine+RRF                    |
+| `fixtures/medium_temporal.json`      | 25    | 15     | direct (6), temporal (4), aggregation (1), multihop (1), noise (1), other (2) — supersession + opinion arc + temporal queries |
+| `fixtures/large_mixed.json`          | 50    | 20     | direct (6), multihop (5), temporal (2), aggregation (2), behavioral (3), noise (2) — full pipeline stress |
+| `fixtures/graph_stress_corpus.json`  | 80    | 20     | dense relational graph for ablation (used by `feature_ablation.ts`)          |
+| `fixtures/conversations.json`        | 8     | 7      | 4 mini-conversations (legacy schema, used by `tests/test_fixture.test.ts`)   |
+
 ---
 
 ## Setup

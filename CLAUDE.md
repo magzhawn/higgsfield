@@ -17,7 +17,7 @@ Built for a technical hiring eval — correctness and code quality are graded.
 
 ## Project structure
 
-higgsfield/
+memory-service/
 ├── CLAUDE.md
 ├── CHANGELOG.md
 ├── README.md
