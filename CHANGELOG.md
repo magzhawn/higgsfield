@@ -1776,3 +1776,202 @@ jumped from 0/4 to 2/4 — exact token matches on "coronado", "beach",
    memory appear?). The 80-turn corpus ablation showed graph improving
    multi-hop from 80% to 90% where the corpus was dense enough to
    form meaningful edges.
+
+---
+
+## v8 — Pre-extraction normalization + HyDE retrieval
+
+**Date:** 2026-05-10
+
+### v8 — what changed
+
+Two features that together close the gap between conversational input
+and retrieval-shaped output. Plus a fix-pack that resolved the
+upstream extraction issues surfaced by the v6 metrics work.
+
+#### Fix-pack (commit `b93dca3`)
+
+Targeted fixes to four problems that surfaced when v6's version
+metrics revealed a 6/11 ceiling that retrieval features could not
+break through:
+
+| Fix | File | Effect |
+| --- | --- | --- |
+| `diet` already in IDENTITY_KEYS (no-op) | `recall.ts` | n/a — was already there |
+| Subject-rule prompt block in both extraction passes | `extraction.ts` | Marco's facts go under `friend_marco_*`, not under user's `employer`/`location` |
+| Type-specific cosine gate (`effectiveGate(memory)`) | `recall.ts` | Facts get COSINE_GATE − 0.05; opinions/events stay at baseline |
+| `KEY_SYNONYMS` injected into BM25 documents at index time | `cache.ts` | "live" matches `location: based in San Diego`; "eat" matches `diet: vegetarian` |
+
+Plus a latent bug fix: `parseMemories()` now strips markdown code
+fences. The longer subject-rule prompt was making Sonnet wrap output
+in ```` ```json ```` blocks that silently failed `JSON.parse` and
+returned 0 memories. Other LLM helpers in the codebase already
+defended against this; extraction.ts didn't.
+
+#### Feature 1 — Turn rewriting before extraction (`extraction.ts`)
+
+A Haiku call runs *before* the two-pass Sonnet+Haiku extraction.
+Raw conversational text is rewritten into a canonical third-person
+narrative:
+
+```text
+User: "I live in San Diego and work at Qualcomm."
+User: "My friend Marco runs an indie game studio called Tidepool in La Jolla."
+
+→ rewrites to →
+
+The user lives in San Diego. The user works at Qualcomm.
+The user's friend Marco runs an indie game studio called Tidepool.
+Marco's studio is located in La Jolla.
+```
+
+Three problems this addresses at the input layer rather than relying
+on prompt rules in every downstream extraction call:
+
+1. **Subject confusion** — every sentence has an explicit subject
+   ("The user" or "The user's friend Marco"), so the explicit/implicit
+   extraction prompts can't accidentally attribute Marco's facts to
+   the user.
+2. **Implicit content** — "skip the theory" → "The user prefers to
+   learn through working code examples rather than theoretical
+   explanations." Behavioural signals become explicit factual
+   sentences before extraction sees them.
+3. **Vocabulary mismatch** — colloquial phrasing gets normalized to
+   factual statement-form text that better matches the vocabulary of
+   future queries.
+
+Skipped under `EMBED_STUB=1` (deterministic tests) and
+`DISABLE_TURN_REWRITE=1` (lets us A/B). The original messages stay
+unchanged in the `turns` table — only the extraction input is
+rewritten.
+
+#### Feature 2 — HyDE at recall time (`recall.ts`)
+
+Hypothetical Document Embedding (Gao et al. 2022, "Precise Zero-Shot
+Dense Retrieval without Relevance Labels"). At recall time, before
+cosine scoring, Haiku is asked to generate a single sentence that
+*would be the perfect stored memory* to answer the query:
+
+```text
+Query:        "where does the user live?"
+Hypothetical: "The user lives in San Diego, California."
+              ^^^ embedded in DOCUMENT space, added to query pool
+```
+
+The hypothetical is fabricated — Haiku invents a plausible-sounding
+fact. Accuracy doesn't matter; only the vector position matters. The
+hypothetical sits in the same embedding-space region as stored memory
+vectors (because it's embedded with `input_type: "document"`), so
+cosine between it and real memories scores far higher than cosine
+between the original query and those memories.
+
+**Implementation note on Haiku 4.5 caution:** the first prompt
+attempt was refused by Haiku ("I don't have any information about
+what you eat..."). Haiku 4.5 is more cautious about fabricating facts
+than older models. The working prompt explicitly frames the request
+as "fabricate a HYPOTHETICAL example for vector-search retrieval —
+the content is never shown to anyone, only embedded." Plus a
+defensive regex that returns `null` if Haiku still emits a meta-
+response starting with "I don't / sorry / unfortunately".
+
+Wired through as `disable_hyde` flag on `RecallRequestSchema`
+(default false). Skipped under `EMBED_STUB=1`. New `hyde_ms` phase
+in the recall timings response.
+
+### HyDE vs derived memories — what is the difference?
+
+Both call Haiku and feed the recall pipeline. They solve completely
+different problems and target opposite failure modes.
+
+| | **HyDE (v8)** | **Derived memories (v5)** |
+| --- | --- | --- |
+| When | At recall time | At ingest time, fire-and-forget after `/turns` |
+| Input | The user's query | Last ~30 raw memories |
+| Output | One fabricated sentence | 0–N grounded insights across 6 categories |
+| Persisted? | No — vector used and discarded | Yes — `derived_memories` table |
+| Truthfulness | **Intentionally fabricated** | **Must be grounded in evidence** (prompt: "prefer NOT deriving over hallucinating") |
+| Visible to caller? | No — only the vector matters | Yes — surfaces as `## User profile` section |
+| Lifecycle | One-shot per query | Reinforced and deduplicated across many ingests |
+| What it bridges | Geometric gap in embedding space | Semantic gap between memories and meaning |
+
+**HyDE addresses a retrieval-geometry problem.** Voyage embeds
+"where does the user live?" near other questions and "lives in San
+Diego" near other facts. These two vectors live in different regions
+of the embedding space, so direct cosine between them is mediocre.
+HyDE manufactures a vector that sits in document space (where the
+real memory vectors are) and uses it as an additional cosine query.
+The *content* of the hypothetical is irrelevant — what matters is
+its position in the embedding space.
+
+**Derived memories address a knowledge-representation problem.** Raw
+memories store *what the user said happened* ("skipped the theory,
+showed me code"). They cannot store *what that pattern means about
+the user* ("user prefers code-first explanations"). Derived memories
+run an LLM analysis over many raw memories to identify recurring
+patterns that are unreachable from raw retrieval — no amount of
+cosine, BM25, or graph would surface "user prefers code-first"
+because the user never said that explicitly. The output is grounded
+because the LLM is constrained by the actual memories shown to it.
+
+**The simplest contrast:**
+
+> HyDE fabricates an *answer* to find real memories.
+> Derived memories synthesize real *patterns* to surface insights raw
+> retrieval can't reach.
+
+Disabling each loses different things. Without HyDE you lose
+retrieval recall on vocabulary-mismatched queries. Without derived
+you lose the `## User profile` section entirely — the behavioural
+enrichment that Recall@K cannot measure.
+
+### v8 — self-eval
+
+```text
+EMBED_STUB=1 bun test:    83 pass / 2 fail / 320 expect()  (~146 s)
+```
+
+The 2 fails are pre-existing: 1 stub-incompatible graph test (own
+comment: `// will fail in stub mode`) + 1 LLM-extraction
+non-determinism on the supersedes pointer. Sessions adding rewrite +
+HyDE introduced zero new failures.
+
+### Version metrics (11-turn corpus, real Voyage)
+
+Run with `VOYAGE_PAID=1 bun run scripts/version_metrics.ts` after
+both features:
+
+| Version | Recall@K | MRR | Direct | Multihop | Behavioral |
+| --- | --- | --- | --- | --- | --- |
+| v1 — cosine-only, no BM25 | 5/11 (45%) | 0.129 | 0/4 | 3/4 | 2/3 |
+| v2 — BM25 + RRF | 10/11 (91%) | 0.514 | 3/4 | 4/4 | 3/3 |
+| v3 — + rewrite + reranker | 10/11 (91%) | 0.580 | 3/4 | 4/4 | 3/3 |
+| v4 — + graph | 10/11 (91%) | 0.565 | 3/4 | 4/4 | 3/3 |
+| v5 — + derived | 10/11 (91%) | 0.539 | 3/4 | 4/4 | 3/3 |
+| v6 — + confidence + decay | 10/11 (91%) | 0.537 | 3/4 | 4/4 | 3/3 |
+
+Compared to the pre-fix-pack baseline (v1=3/11, v2-v6=6/11):
+
+- v2-v6 jumped to **10/11 (91%)** — +4 hits across the table
+- Behavioural coverage is now 3/3 across all v2+ rows (was 2/3) — the
+  third behavioural probe ("how should I explain something to this
+  user?") now hits because turn rewriting converts "skip the theory,
+  show me code" into an explicit preference statement at extraction
+  time, which the recall vocabulary then matches
+- v1 went from 3/11 → 5/11 — the subject-confusion fix means the
+  user's `location` and `employer` are no longer corrupted by Marco's
+  facts, so direct queries that depend on those finally hit even
+  under cosine-only retrieval
+
+### v8 — known limitations
+
+- Turn rewriting adds a Haiku round-trip (~1 s) to every `/turns`
+  call. For high-throughput ingestion this is the largest single
+  latency cost in the extraction pipeline. Disable via
+  `DISABLE_TURN_REWRITE=1` if needed.
+- HyDE adds a Haiku round-trip (~1.3–1.9 s on this corpus) to every
+  `/recall`. Always-on by default — disable per-request via
+  `disable_hyde: true`.
+- HyDE requires a model willing to fabricate. Haiku 4.5's stronger
+  caution required prompt engineering to avoid meta-refusals; future
+  model releases may need similar tuning. The defensive regex catches
+  refusals and degrades to non-HyDE retrieval gracefully.
