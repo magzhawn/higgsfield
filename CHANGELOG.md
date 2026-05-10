@@ -103,6 +103,23 @@ All 18 contract tests pass including:
 - Add per-item fallback in `batchEmbedAndStore` so a single 429 mid-batch doesn't silently drop the remaining embeddings
 - Add `POST /turns` latency logging so long extraction calls are observable in production
 
+### v1 — outcome
+
+**Metrics:** 18/18 contract tests pass (~105 s suite). Two-pass parallel
+extraction (Sonnet + Haiku via `Promise.all`). 8 canonical identity keys
+drive supersession. Cosine-only retrieval, top-20.
+
+**Conclusion:** Pipeline shape is correct end-to-end (ingest → extract
+→ embed → recall → context). But cosine alone has two failure modes:
+keyword queries with rare names underperform when cosine doesn't
+score them well, and any "what about the user" query surfaces identity
+facts because tier-1 always fires regardless of relevance.
+
+**Why v2 was needed:** A single retrieval signal can't simultaneously
+handle keyword exactness (proper nouns) and noise rejection (unrelated
+queries). Adding BM25 alongside cosine, fused via RRF, gives both a
+token-exact match path and a calibratable score floor for gating.
+
 ---
 
 ## v2 — BM25 + RRF hybrid retrieval, latency logging
@@ -452,6 +469,26 @@ Ran 21 tests across 2 files. [23.86s]
 
 All 21 tests pass. LLM extraction and recall still use real Claude API calls (Sonnet + Haiku); only Voyage embedding is replaced by the stub.
 
+### v2 — outcome
+
+**Metrics:** 21/21 tests pass (~205 s with real Voyage / ~24 s with
+stub embedder). `COSINE_GATE = 0.40` calibrated empirically: noise
+ceiling 0.28, real-query floor 0.40 — a 0.12 gap. `BM25_GATE = 0`
+(any token overlap qualifies). Three failed calibration attempts
+documented before the working gate. Noise queries now return `""`.
+
+**Conclusion:** Hybrid BM25 + RRF works. The hardest part wasn't the
+algorithm — it was discovering RRF scores are corpus-size dependent,
+not query-relevance dependent. Diagnostic-driven threshold setting
+("measure first, gate after") is the only reliable way to calibrate
+a cosine floor on Voyage embeddings.
+
+**Why v3 was needed:** Hybrid retrieval still misses queries phrased
+differently than stored memory text ("occupation" vs "employer"),
+can't bridge facts across separate memories ("dog's city"), and
+treats top-N memories as equally relevant. LLMs in the loop —
+query rewriting, entity-based hops, and a reranker — close those gaps.
+
 ---
 
 ## v3 — LLM reranker + opinion history
@@ -676,6 +713,29 @@ Gaps that are known and accepted for this submission:
 - Single-mention implicit facts with no reinforcement (Figma)
 - Behavioral preference inference without trigger vocabulary (coffee)
 - Multi-hop requiring two low-scoring memories to connect
+
+### v3 — outcome
+
+**Metrics:** 23/23 tests pass (~39 s in stub mode). Three new
+LLM-augmented features added in series: query rewriter (Haiku → 2
+alternative queries), multi-hop entity extractor (Haiku → up to 4
+named entities → cosine hops), reranker (Haiku scores top-10
+candidates 1-5). Per-recall LLM cost: ~3 s warm. Opinion history
+arc surfaces full supersession chain when an opinion is recalled.
+
+**Conclusion:** LLM-in-the-loop retrieval is straightforward to add but
+expensive. The v6 ablation later showed that on a binary hit/miss
+metric, only query rewriting earns its cost (+2 hits, 460 ms). The
+reranker improves precision@1 — a benefit binary recall metrics can't
+detect. Multi-hop entity extraction earns its cost only on sparse-graph
+corpora; once the embedding space densifies, cosine handles the hops.
+
+**Why v4 was needed:** Multi-hop via LLM entity extraction is expensive
+(Haiku call per recall) and only bridges memories that share named
+entities. Pairs like "morning routine" → "10-minute meditation" have
+zero token overlap but are obviously related. A precomputed semantic
+association graph addresses both: token-free traversal at read time,
+and the graph captures relatedness LLM entity extraction can't see.
 
 ## v4 — Associative memory graph (spreading activation)
 
@@ -902,6 +962,30 @@ constant across all three tiers.
 
 **This is the version submitted.**
 
+### v4 — outcome
+
+**Metrics:** Multi-hop probe success on the dog→hiking→city corpus:
+80% → 90%. Edge-build cost: ~1 ms per turn (50 candidates × pairwise
+cosine, MAX_CANDIDATES bound). Edge minimum strength: 0.55 (calibrated
+above the same Voyage 0.40 noise floor). Read-time traversal: 2 hops,
+0.7 per-hop decay, 0.25 activation threshold. 5 new graph tests + 23
+pre-existing tests.
+
+**Conclusion:** Spreading activation works on dense semantic graphs.
+The pet → hiking → city chain that LLM entity extraction couldn't bridge
+(no shared tokens) traverses correctly via the graph. Cost is bounded
+by the candidate window — old memories may miss new associations after
+the 50-memory window passes; the `POST /graph/:user/rebuild` endpoint
+fixes this for users with long histories. Stub mode produces no edges
+(stub vectors aren't semantic) — graph tests require real Voyage.
+
+**Why v5 was needed:** Raw memories store *what happened*. They
+cannot store *what it means about who the user is* — communication
+style, cognitive patterns, emotional state, goals. These behavioral
+signals are the gap between a memory database and a user profile.
+A derivation layer that runs LLM analysis over recent memories
+surfaces these patterns at recall time.
+
 ---
 
 ## v5 — Derived memories (Honcho-inspired behavioral layer)
@@ -1112,6 +1196,32 @@ signal vs 0/8 without — that is the honest win.
 **One-sentence verdict:** the hit-rate improvement is likely a
 calibration artefact; the profile section is a genuine new capability
 worth its token cost for any non-factual workload.
+
+### v5 — outcome
+
+**Metrics:** A/B comparison on a 9-turn behavioural corpus —
+overall hit rate 6/8 → 8/8 (+2), behavioural/implicit probes
+5/6 → 6/6, profile section presence 0/8 → 8/8. 33 derived memories
+produced from 9 turns across 6 categories. Derivation latency:
+~3 s per turn (fire-and-forget, never blocks /turns). Top-confidence
+insight reinforced 3× before the A/B run.
+
+**Conclusion:** The `## User profile` section is the genuine new
+capability — behavioural signals like "prefers example-first
+explanations" are unreachable from raw memories by design. Two of
+the recall-hit flips are calibration artifacts: the derived RRF
+boost compensated for borderline cosine on facts that should have
+surfaced anyway. The honest, unambiguous win is the profile section
+itself, which surfaces in 8/8 responses with derived ON vs 0/8 with
+it OFF.
+
+**Why v6 was needed:** The retrieval pipeline now uses BM25, cosine,
+RRF, graph spreading, reranker, and derived boosts. But it has never
+been measured component-by-component on the same corpus. Which
+features actually earn their latency cost? And along the way: a
+suspected precision bug — noise queries (questions about topics not
+in memory) appear to leak identity facts into context, but it was
+never quantified.
 
 ---
 
@@ -1427,6 +1537,34 @@ with "rewrite earns its cost; reranker/entities/graph/derived
 each serve objectives that binary hit/miss cannot measure" and
 pointing at the data + recommended secondary metrics here.
 
+### v6 — outcome
+
+**Metrics:** Per-feature ablation on the 80-turn graph_stress_corpus
+(REPEAT=3): rewrite +2 hits / 460 ms, all other features 0 hits gained.
+Precision floor reduced baseline latency 4105 ms → 3373 ms. Noise
+probes 0/4 → 3/4 (one borderline cosine miss remains, threshold
+calibration). Hit rate 16/20 → 18/20 — the floor freed budget for
+real probes by short-circuiting noise. Voyage rate-limit pacing
+removed: 22 s → 0.5 s between ingests (paid 2000 RPM tier).
+
+**Conclusion:** "Every feature shows zero quality gain" is a
+metric-design problem, not a feature problem. Binary hit/miss can't
+see the reranker's precision improvements, the derived layer's
+behavioural enrichment, or the graph's value on sparser corpora.
+Rewrite is the only feature whose objective the metric can detect,
+and it earned its 460 ms. The precision floor + BM25 stop-words +
+stemmer are load-bearing for the ablation result — without them noise
+queries leaked identity facts and rewrite's value was masked.
+
+**Why v7 was needed:** The ablation surfaced a deeper gap. The ranking
+pipeline already had data it wasn't using. Every memory carries a
+`confidence` score (0.0-1.0, set at extraction time) and an
+`updated_at` timestamp. Neither was used in scoring. A 0.6-confidence
+implicit Haiku inference ranks identically to a 0.95-confidence
+explicit Sonnet fact with the same RRF score. A six-month-old opinion
+ranks identically to one from yesterday. Both gaps are fixable using
+existing schema fields — no new infrastructure.
+
 ---
 
 ## v7 — Time-aware, confidence-calibrated retrieval
@@ -1555,3 +1693,42 @@ DECAY_ENABLED = false      // disables decay entirely
 - Decay makes recall non-deterministic over time — same query
   returns different results a month later. Intentional behavior,
   not a bug — human memory works this way.
+
+### v7 — outcome
+
+**Metrics:** ~55 lines added to `src/recall.ts` across Sessions 6-1
+(confidence weighting), 6-2 (memory decay + recency tiebreaker), and
+6-3 (one new integration test). Test suite: 80 → 81 pass with the new
+test. Per-type half-lives: opinion 30 d, event 14 d, preference 90 d,
+habit 60 d, fact ∞. `RECENCY_WEIGHT = 0.002` (same order of magnitude
+as RRF scores — pure tiebreaker). Zero new tables, zero new API
+calls, zero new infrastructure.
+
+**Conclusion:** Two signals existed in the schema for ~5 versions
+before being used in ranking. Wiring them in took ~55 lines. The
+retrieval pipeline no longer treats a high-confidence explicit fact
+and an uncertain inference identically. It no longer treats a memory
+from yesterday and one from six months ago equally. The decay
+function is correct and verified — observable behavior depends on
+memories aging in real wall-clock time since ingest, since
+`memory.updated_at` uses `datetime('now')` rather than the request
+body's timestamp field.
+
+**What's next (post-v7):**
+
+- *Calibration over heuristics.* Half-lives are intuition (Ebbinghaus
+  curve plus judgment), not data. Production would derive them from
+  retention signals — was the memory actually correct when recalled?
+- *Confidence recalibration.* LLM-emitted confidence is directionally
+  meaningful but not numerically calibrated. A reliability-diagram
+  pass against ground truth would tighten the weighting.
+- *Better metrics.* The metric-design gap from v6 is still open:
+  precision@1 (reranker), profile-section presence (derived),
+  sparse-graph multi-hop (entities). Each would expose value the
+  current binary hit/miss script cannot detect.
+- *Update propagation.* If `updated_at = body.timestamp` were
+  written at ingest, decay would reflect the conversation's temporal
+  context (when the user said it) rather than the system's ingest
+  clock. That's a small extraction.ts change, deferred because the
+  current behavior is also defensible (a memory extracted yesterday
+  was *believed* yesterday).
