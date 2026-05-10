@@ -34,6 +34,7 @@ export const RecallRequestSchema = z.object({
   disable_bm25: z.boolean().optional().default(false),
   disable_hyde: z.boolean().optional().default(false),
   disable_temporal: z.boolean().optional().default(false),
+  disable_aggregation: z.boolean().optional().default(false),
 })
 export type RecallRequest = z.infer<typeof RecallRequestSchema>
 

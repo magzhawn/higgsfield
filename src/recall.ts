@@ -55,6 +55,43 @@ function isTemporalQuery(query: string): boolean {
   return TEMPORAL_SIGNALS.some((s) => lower.includes(s))
 }
 
+// Aggregation query signals — phrases that indicate the user wants a SET of
+// memories, not the single best match. Without this branch, RRF returns a
+// ranked list and the token budget fills greedily from the top, so users see
+// 1-2 hobbies when they asked for "all of them" with no signal it's partial.
+const AGGREGATION_SIGNALS = [
+  "all of", "all the", "every", "list", "what are",
+  "what skills", "what hobbies", "what languages",
+  "everything about", "full list", "complete list",
+  "any and all", "each", "enumerate", "summarize all",
+  "how many", "count",
+]
+
+// Key prefixes that commonly appear in aggregation queries. Matched against
+// the query text to infer the target type, then against memory.key to filter.
+// Plural-aware stems: "hobb" matches both "hobby" and "hobbies" — same trick
+// the spec applies to "allerg" (allergy/allergies).
+const AGGREGATION_KEY_PREFIXES = [
+  "hobb", "skill", "language", "interest", "project",
+  "pet", "friend", "health", "medication", "allerg",
+  "preference", "goal", "constraint",
+]
+
+function isAggregationQuery(query: string): boolean {
+  const lower = query.toLowerCase()
+  const hasSignal = AGGREGATION_SIGNALS.some((s) => lower.includes(s))
+  const hasAggType = AGGREGATION_KEY_PREFIXES.some((p) => lower.includes(p))
+  return hasSignal || hasAggType
+}
+
+function inferAggregationPrefix(query: string): string | null {
+  const lower = query.toLowerCase()
+  for (const prefix of AGGREGATION_KEY_PREFIXES) {
+    if (lower.includes(prefix)) return prefix
+  }
+  return null
+}
+
 export interface MemoryRow {
   id: string
   turn_id: string
@@ -279,6 +316,7 @@ export async function recall(
   disableBm25 = false,
   disableHyde = false,
   disableTemporal = false,
+  disableAggregation = false,
 ): Promise<{ context: string; citations: Citation[]; timings: Record<string, number> }> {
   const timings: Record<string, number> = {}
   const tStart = performance.now()
@@ -333,6 +371,54 @@ export async function recall(
   }
 
   if (memories.length === 0) return { context: "", citations: [], timings }
+
+  // Step 1c — aggregation shortcut. When the query asks for a SET of memories
+  // ("all hobbies", "list every skill", "how many languages"), bypass RRF
+  // entirely and return every memory whose key matches the inferred prefix,
+  // sorted chronologically. RRF + token-budget greedy fill drops items past
+  // the top few — fine for point queries, wrong for "list everything" queries.
+  // Only fires when (1) signal detected, (2) prefix inferred, (3) at least one
+  // memory matches; otherwise falls through to the normal pipeline.
+  const aggregation = isAggregationQuery(query)
+  if (aggregation && !disableAggregation && !process.env.EMBED_STUB) {
+    const aggPrefix = inferAggregationPrefix(query)
+    const aggMemories = aggPrefix
+      ? memories.filter(
+          (m) =>
+            m.key.toLowerCase().startsWith(aggPrefix) ||
+            m.key.toLowerCase().includes(aggPrefix),
+        )
+      : memories
+
+    if (aggPrefix && aggMemories.length > 0) {
+      console.log(
+        `[recall] aggregation query — bypassing RRF, ` +
+          `returning all ${aggMemories.length} memories ` +
+          `with prefix "${aggPrefix}"`,
+      )
+
+      const sorted = [...aggMemories].sort(
+        (a, b) =>
+          new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+      )
+
+      const lines = sorted.map(
+        (m) => `- [${m.created_at?.slice(0, 10)}] ${m.key}: ${m.value}`,
+      )
+      const header = `## All ${aggPrefix} memories (${sorted.length} found)\n`
+      const aggContext = header + lines.join("\n")
+
+      const aggCitations = sorted.map((m) => ({
+        turn_id: m.turn_id,
+        score: 1.0,
+        snippet: m.value.slice(0, 120),
+      }))
+
+      timings.aggregation_ms = performance.now() - tStart
+      timings.total_ms = performance.now() - tStart
+      return { context: aggContext, citations: aggCitations, timings }
+    }
+  }
 
   // Reserve up to 20% of the token budget for the derived "User profile"
   // section. Computed up front so tier1/tier2 budget fill knows the cap.
