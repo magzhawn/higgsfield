@@ -59,17 +59,22 @@ const INLINE_CORPUS: Turn[] = [
 ]
 
 const INLINE_PROBES: Probe[] = [
-  { query: "where does the user live?",                            expect: ["san diego"],                       type: "direct" },
-  { query: "what is the user's dog's name?",                       expect: ["pickle"],                          type: "direct" },
-  { query: "where does the user work?",                            expect: ["qualcomm"],                        type: "direct" },
-  { query: "what does the user eat?",                              expect: ["vegetarian"],                      type: "direct" },
-  { query: "what city does the user's dog live in?",               expect: ["san diego"],                       type: "multihop" },
-  { query: "where does the dog go for walks?",                     expect: ["coronado", "beach"],               type: "multihop" },
-  { query: "what does the user's friend do for work?",             expect: ["game", "studio", "tidepool"],      type: "multihop" },
-  { query: "where does the user eat tacos?",                       expect: ["convoy", "san diego"],             type: "multihop" },
-  { query: "how should I format a technical explanation for this user?", expect: ["code", "example", "direct", "concise"], type: "behavioral" },
-  { query: "does this user prefer theory or practice?",            expect: ["practice", "code", "example", "direct"],     type: "behavioral" },
-  { query: "what is the user currently working on?",               expect: ["scaling", "traffic", "caching", "performance"], type: "behavioral" },
+  // Direct
+  { query: "where does the user live?",              expect: ["san diego"],                    type: "direct" },
+  { query: "what is the user's dog's name?",         expect: ["pickle"],                       type: "direct" },
+  { query: "where does the user work?",              expect: ["qualcomm"],                     type: "direct" },
+  { query: "what is the user's diet?",               expect: ["vegetarian"],                   type: "direct" },
+
+  // Multihop
+  { query: "what city does the user's dog live in?", expect: ["san diego"],                    type: "multihop" },
+  { query: "where does the dog go for walks?",       expect: ["coronado", "beach"],            type: "multihop" },
+  { query: "what does the user's friend Marco do?",  expect: ["game", "tidepool", "studio"],   type: "multihop" },
+  { query: "where does the user eat tacos?",         expect: ["convoy", "san diego"],          type: "multihop" },
+
+  // Behavioral
+  { query: "how should I explain something to this user?",   expect: ["code", "example", "direct"],          type: "behavioral" },
+  { query: "does this user prefer theory or practice?",      expect: ["practice", "code", "example"],        type: "behavioral" },
+  { query: "what is the user preparing for at work?",        expect: ["scaling", "traffic", "spike", "10x"], type: "behavioral" },
 ]
 
 // ─── Version configurations ──────────────────────────────────────────────────
@@ -84,16 +89,18 @@ interface VersionConfig {
     disable_rerank?: boolean
     disable_graph?: boolean
     disable_derived?: boolean
+    disable_bm25?: boolean
   }
 }
 
 const VERSIONS: VersionConfig[] = [
   {
     name: "v1 (cosine-only, no BM25, no rerank)",
-    // BM25 + RRF cannot be turned off (no flag). v1's "cosine-only" is
-    // approximated by disabling everything that v2+ added; BM25's
-    // contribution remains baked in. Best-effort simulation.
-    flags: { disable_rewrite: true, disable_entities: true, disable_graph: true, disable_rerank: true, disable_derived: true },
+    // disable_bm25 (added post-v6) lets us genuinely simulate v1 instead
+    // of falling back to v2's BM25+RRF. With BM25 off, RRF degrades to
+    // cosine-only ranking and the precision floor depends entirely on
+    // originalMaxCosine < PRECISION_FLOOR_COSINE.
+    flags: { disable_bm25: true, disable_rewrite: true, disable_entities: true, disable_graph: true, disable_rerank: true, disable_derived: true },
   },
   {
     name: "v2 (BM25 + RRF, noise gate)",

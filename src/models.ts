@@ -31,6 +31,7 @@ export const RecallRequestSchema = z.object({
   disable_rewrite: z.boolean().optional().default(false),
   disable_entities: z.boolean().optional().default(false),
   disable_rerank: z.boolean().optional().default(false),
+  disable_bm25: z.boolean().optional().default(false),
 })
 export type RecallRequest = z.infer<typeof RecallRequestSchema>
 

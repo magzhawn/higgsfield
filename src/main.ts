@@ -74,13 +74,13 @@ app.post("/recall", zValidator("json", RecallRequestSchema), async (c) => {
     const {
       query, user_id, max_tokens,
       disable_graph, disable_derived,
-      disable_rewrite, disable_entities, disable_rerank,
+      disable_rewrite, disable_entities, disable_rerank, disable_bm25,
     } = c.req.valid("json")
     if (!user_id) return c.json({ context: "", citations: [] })
     const { context, citations, timings } = await recall(
       query, user_id, max_tokens,
       disable_graph, disable_derived,
-      disable_rewrite, disable_entities, disable_rerank,
+      disable_rewrite, disable_entities, disable_rerank, disable_bm25,
     )
     console.log(`[recall] ${(performance.now() - t0).toFixed(0)}ms`)
     return c.json({ context, citations, timings })
@@ -133,6 +133,27 @@ app.post("/search", zValidator("json", SearchRequestSchema), async (c) => {
   } catch (err) {
     console.error(err)
     return c.json({ results: [] })
+  }
+})
+
+app.get("/users", (c) => {
+  try {
+    const rows = db.query(`
+      SELECT
+        u.user_id,
+        (SELECT COUNT(*) FROM memories WHERE user_id = u.user_id AND active = 1) AS memory_count,
+        (SELECT COUNT(*) FROM turns    WHERE user_id = u.user_id)                AS turn_count
+      FROM (
+        SELECT DISTINCT user_id FROM memories WHERE active = 1 AND user_id IS NOT NULL
+        UNION
+        SELECT DISTINCT user_id FROM turns                     WHERE user_id IS NOT NULL
+      ) u
+      ORDER BY u.user_id
+    `).all() as Array<{ user_id: string; memory_count: number; turn_count: number }>
+    return c.json({ users: rows })
+  } catch (err) {
+    console.error(err)
+    return c.json({ error: "internal error" }, 500)
   }
 })
 

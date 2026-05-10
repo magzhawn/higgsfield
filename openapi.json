@@ -266,6 +266,38 @@
         }
       }
     },
+    "/users": {
+      "get": {
+        "summary": "List all known user IDs",
+        "description": "Returns distinct user_ids drawn from memories (active) and turns, along with per-user counts. Useful for debugging extraction and recall.",
+        "operationId": "listUsers",
+        "responses": {
+          "200": {
+            "description": "Known users with memory and turn counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "users": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "user_id": { "type": "string", "example": "user-1" },
+                          "memory_count": { "type": "integer", "example": 12 },
+                          "turn_count": { "type": "integer", "example": 4 }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/users/{userId}/memories": {
       "get": {
         "summary": "List all memories for a user",

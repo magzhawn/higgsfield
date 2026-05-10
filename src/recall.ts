@@ -223,6 +223,7 @@ export async function recall(
   disableRewrite = false,
   disableEntities = false,
   disableRerank = false,
+  disableBm25 = false,
 ): Promise<{ context: string; citations: Citation[]; timings: Record<string, number> }> {
   const timings: Record<string, number> = {}
   const tStart = performance.now()
@@ -281,22 +282,27 @@ export async function recall(
   // Also track scores from the ORIGINAL query alone for the precision floor —
   // rewrite variants are for retrieval recall, not for deciding whether the
   // user's actual question deserves an answer at all.
+  // When disableBm25 is set, all maps stay empty and originalMaxBm25 stays 0,
+  // so RRF degrades to cosine-only and the precision floor relies entirely
+  // on cosine — used by version_metrics.ts to simulate v1's cosine-only mode.
   const tBm25 = performance.now()
-  let bm25Engine = getCachedBM25(userId)
-  if (!bm25Engine) bm25Engine = buildAndCacheBM25(userId, memories)
-
   const bm25Map = new Map<string, number>()
   let originalMaxBm25 = 0
-  for (let qi = 0; qi < queries.length; qi++) {
-    const raw = bm25Engine.search(queries[qi], memories.length) as Array<[string, number]>
-    for (const [id, score] of raw) {
-      if ((bm25Map.get(id) ?? 0) < score) bm25Map.set(id, score)
-      if (qi === 0 && score > originalMaxBm25) originalMaxBm25 = score
+  let bm25Scored: Array<{ id: string; score: number }> = []
+  if (!disableBm25) {
+    let bm25Engine = getCachedBM25(userId)
+    if (!bm25Engine) bm25Engine = buildAndCacheBM25(userId, memories)
+    for (let qi = 0; qi < queries.length; qi++) {
+      const raw = bm25Engine.search(queries[qi], memories.length) as Array<[string, number]>
+      for (const [id, score] of raw) {
+        if ((bm25Map.get(id) ?? 0) < score) bm25Map.set(id, score)
+        if (qi === 0 && score > originalMaxBm25) originalMaxBm25 = score
+      }
     }
+    bm25Scored = Array.from(bm25Map.entries())
+      .map(([id, score]) => ({ id, score }))
+      .sort((a, b) => b.score - a.score)
   }
-  const bm25Scored = Array.from(bm25Map.entries())
-    .map(([id, score]) => ({ id, score }))
-    .sort((a, b) => b.score - a.score)
   timings.bm25_ms = performance.now() - tBm25
 
   // Step 3b — cosine scoring across all query variants. Same dual tracking:
