@@ -91,6 +91,119 @@ interface ExtractedMemory {
   correction_of?: string | null
 }
 
+// Local row shape for contradiction detection — only the fields we read.
+// Mirrors src/recall.ts MemoryRow without dragging the cross-file dependency.
+interface MemoryRow {
+  id: string
+  type: string
+  key: string
+  value: string
+}
+
+// Cheap signal-word gate. Only when the raw turn contains one of these
+// phrases do we pay for the Haiku contradiction-detection call. Designed to
+// be a no-op for ~90% of turns (most conversations don't contradict prior
+// state). Keep this list conservative — every false positive costs ~1 s of
+// Haiku latency on /turns.
+const CONTRADICTION_SIGNALS = [
+  "used to", "no longer", "quit", "left", "changed my mind",
+  "actually", "correction", "i meant", "not anymore", "switched",
+  "moved on", "stopped", "don't anymore", "completely different",
+  "opposite", "was wrong", "previously", "former", "resigned",
+  "fired", "laid off", "broke up", "divorced", "sold", "gave up",
+]
+
+function hasContradictionSignal(text: string): boolean {
+  const lower = text.toLowerCase()
+  return CONTRADICTION_SIGNALS.some((s) => lower.includes(s))
+}
+
+// Catches the cases that exact-key supersession misses:
+//   - The new turn says "I quit" but extracts no new employer fact —
+//     existing employer key is never superseded by key-match.
+//   - The new turn extracts under a slightly different key
+//     ("opinion_ts" vs stored "opinion_typescript") — both stay active.
+// Skipped under EMBED_STUB to keep tests deterministic. Never throws — a
+// failure to detect a contradiction is preferable to crashing /turns.
+async function detectContradictions(
+  newMemories: ExtractedMemory[],
+  existingMemories: MemoryRow[],
+  rawTurnText: string,
+): Promise<string[]> {
+  if (process.env.EMBED_STUB) return []
+  if (existingMemories.length === 0) return []
+
+  // Only check fact and opinion types — events ("went to a concert") and
+  // habits ("meditates daily") aren't superseded by contradiction signals.
+  const checkable = existingMemories
+    .filter((m) => m.type === "fact" || m.type === "opinion")
+    .slice(0, 20) // bound LLM input size
+
+  if (checkable.length === 0) return []
+
+  try {
+    const existingList = checkable
+      .map((m) => `[${m.id.slice(0, 8)}] ${m.key}: ${m.value}`)
+      .join("\n")
+
+    const newList =
+      newMemories.length > 0
+        ? newMemories.map((m) => `${m.key}: ${m.value}`).join("\n")
+        : "(none extracted)"
+
+    const resp = await getClient().messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 200,
+      messages: [
+        {
+          role: "user",
+          content:
+            `A user said: "${rawTurnText}"\n\n` +
+            `New memories extracted from this turn:\n${newList}\n\n` +
+            `Existing stored memories:\n${existingList}\n\n` +
+            `Which existing memories are now CONTRADICTED or INVALIDATED ` +
+            `by what the user just said?\n\n` +
+            `Return ONLY a valid JSON array of the 8-char memory ID ` +
+            `prefixes that should be superseded. Return [] if none.\n` +
+            `Be conservative — only include CLEAR contradictions.\n` +
+            `Example: ["abc12345", "def67890"]`,
+        },
+      ],
+    })
+
+    const block = resp.content.find((b) => b.type === "text")
+    if (!block || block.type !== "text") return []
+    // Extract the first JSON array — Haiku occasionally adds prose preamble
+    // ("Here are the contradicted memories: [...]") or wraps in code fences.
+    // Both patterns survive a literal JSON.parse(text) failure.
+    const stripped = block.text.replace(/```json|```/g, "").trim()
+    const arrayMatch = stripped.match(/\[[\s\S]*?\]/)
+    const jsonText = arrayMatch ? arrayMatch[0] : stripped
+    const prefixes = JSON.parse(jsonText) as string[]
+    if (!Array.isArray(prefixes)) return []
+
+    // Map 8-char prefixes back to full IDs
+    const toSupersede: string[] = []
+    for (const prefix of prefixes) {
+      if (typeof prefix !== "string") continue
+      const match = checkable.find((m) => m.id.startsWith(prefix))
+      if (match) toSupersede.push(match.id)
+    }
+
+    if (toSupersede.length > 0) {
+      console.log(
+        `[extract] contradiction: superseding ${toSupersede.length} ` +
+          `memories — ${toSupersede.map((id) => id.slice(0, 8)).join(", ")}`,
+      )
+    }
+
+    return toSupersede
+  } catch (err: any) {
+    console.error("[extract] contradiction check failed:", err?.message ?? err)
+    return [] // never crash extraction
+  }
+}
+
 function getClient(): Anthropic {
   return new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 }
@@ -219,6 +332,21 @@ export async function extractMemories(
     ])
 
     const merged = [...explicit, ...implicit]
+
+    // Contradiction detection — runs BEFORE the merged.length check so a
+    // turn that contradicts existing facts but extracts no new ones still
+    // triggers supersession (e.g. "I quit my job" produces no new employer
+    // memory but should still deactivate the old one). Gated on a cheap
+    // signal-word check so the Haiku call is a no-op for ~90% of turns.
+    const rawText = messages.map((m) => m.content).join(" ")
+    if (hasContradictionSignal(rawText)) {
+      const existingActive = q.getMemoriesByUser(userId) as MemoryRow[]
+      const contradictedIds = await detectContradictions(merged, existingActive, rawText)
+      for (const id of contradictedIds) {
+        q.supersedeMemory(id)
+      }
+    }
+
     if (merged.length === 0) return []
 
     const insertedIds: string[] = []
