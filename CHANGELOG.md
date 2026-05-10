@@ -2010,3 +2010,99 @@ Contradiction detection and memory_class are clean behavioral wins:
   needed — signal-word gate + Haiku judge)
 - Hiking and climbing coexist as separate accumulating memories
   (the hobby supersession bug documented in v2 is now fixed)
+
+---
+
+## v9 — Temporal query detection
+
+**What changed:** Recall now detects "what did I used to..." / "before" /
+"previously" style queries via a lexical signal list and expands the candidate
+pool to include superseded (active=0) memories. Inactive memories enter with
+a 0.7× confidence penalty so active facts still outrank them on equal RRF
+scores. BM25 cache stays active-only so non-temporal queries on the same user
+don't see leaked inactive entries.
+
+**Why:** Supersession was working at write time — `employer: Stripe` correctly
+deactivated when "I quit" came in — but historical queries returned nothing.
+The retrieval pipeline filtered to `active = 1` everywhere, so "what did I
+used to do for work?" had no path to the superseded record.
+
+**Result:** Historical recall works for any query containing a TEMPORAL_SIGNALS
+phrase. Active facts still win for ambiguous cases (e.g. "what's their job?")
+because the temporal branch only fires on explicit historical signals. Per-request
+`disable_temporal: true` flag for ablation.
+
+**Next:** Detection is lexical-only — phrases like "what was their old role"
+work; "their previous gig" doesn't (no signal-word match). A Haiku-judged
+detector would fix this but adds a per-query LLM call. Not worth it until
+the lexical version produces a measurable false-negative rate on a real
+corpus.
+
+---
+
+## v10 — Aggregation query detection
+
+**What changed:** Recall short-circuits queries asking for a SET of memories
+("what are all my hobbies?", "list every skill", "how many languages?") by
+bypassing RRF entirely. When an AGGREGATION_SIGNAL ("all", "list", "every"…)
+plus an inferred type prefix (`hobb`, `skill`, `pet`, `allerg`…) both match,
+returns every memory whose key contains the prefix, sorted chronologically,
+under a single `## All <prefix> memories (N found)` header.
+
+**Why:** RRF + greedy token-budget fill is point-retrieval shaped. With 6
+hobbies stored, a 1024-token budget filled after 2-3 entries and the rest
+were silently dropped — user saw an incomplete answer with no signal it was
+partial. The "what does the user collect?" probe failure documented in v6
+was the same shape.
+
+**Result:** On the smoke corpus (4 distinct hobbies — hiking, rock climbing,
+guitar, pottery), aggregation query returns all 4 (8 hobby-prefixed memories
+total) in 15 ms vs 6391 ms for full RRF, since the bypass skips rewrite +
+HyDE + entity hops + reranker. Point queries unaffected — `where does the
+user work?` still goes through normal RRF (4611 ms, full pipeline) and
+returns the Stripe employer fact. Per-request `disable_aggregation: true`
+flag for ablation.
+
+**Next:** Header currently exposes the match stem ("## All hobb memories")
+because plural-aware prefixes use stems like `hobb`/`allerg` that match both
+singular and plural forms. Cosmetic — should split label vs match stem so
+the header reads "## All hobby memories". Also: the prefix list is hand-curated;
+new memory types need entries added.
+
+---
+
+## v11 — Session consolidation
+
+**What changed:** Added `consolidateSession(sessionId, userId)` that runs a
+Haiku pass over the full session transcript at session end and inserts
+memories the per-turn extraction missed. Wired two ways: (a) fire-and-forget
+inside DELETE /sessions/:sessionId after the synchronous cleanup, with a
+pre-delete user_id snapshot so attribution survives; (b) manual trigger via
+POST /sessions/:sessionId/consolidate for testing and on-demand cleanup.
+Inserts go through a shared `writeSingleMemory` helper that mirrors the
+per-turn pipeline's singleton/accumulating/event semantics.
+
+**Why:** Per-turn extraction sees a 3-turn window. Single-mention implicit
+facts that span turn boundaries are silently dropped: "My partner Lena…" in
+turn 1 + "She works at Figma" in turn 4 → Figma gets attributed to an
+"acquaintance" because pronoun resolution failed across the gap.
+"I grab an oat milk flat white every morning" → captured as `morning_routine`
+but no `coffee_preference` was synthesized. Both patterns are common in real
+conversations and both were undetectable from the per-turn view.
+
+**Result:** Smoke test on the documented Lena/Figma/oat-milk session:
+per-turn extraction captured `partner_lena_trait`, `morning_routine`,
+`acquaintance_employer`. Consolidation added `partner_lena_employer:
+"Lena works at Figma"` (cross-turn pronoun resolved) and `coffee_preference:
+"prefers oat milk flat white"` (behavioral pattern lifted to preference).
+Log line `[extract] consolidation: found N missed memories` confirms the path
+fired. Tests still 83/85 (no regressions; same 2 known stub-incompatible
+failures as before).
+
+**Next:** Two open questions worth deciding. (1) DELETE /sessions currently
+wipes per-turn memories along with turns, so consolidation must run *after*
+the delete and lands its inserts as orphaned-session_id memories tied to
+the user. Either keep this (consolidation = "extract surviving insights as
+session ends") or change DELETE to keep memories. (2) Consolidation is
+unbounded by turn count — long sessions could blow the Haiku context window.
+Should chunk if turns > ~20.
